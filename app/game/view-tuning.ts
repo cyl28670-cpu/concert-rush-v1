@@ -10,12 +10,15 @@
  * - concertStageHeightRatio：演唱会现场占画面高度，0.2 = 画面高度的 1/5。
  * - playerDepth：数值越小，人物越靠近屏幕底部；建议范围 3.3～4.5。
  * - playerScale：人物整体大小；1 为原始比例，建议范围 0.7～1.3。
- * - collectibleScale：门票、磁铁和应援棒大小；建议范围 0.7～1.5。
+ * - collectibleScale：门票和应援棒大小；建议范围 0.7～1.5。
  * - obstacleScale：音响、路障和横幅整体大小；建议范围 0.7～1.4。
- * - roadHalfWidth：数值越大，道路左右越宽。
+ * - roadHalfWidth：数值越大，道路左右越宽；玩家、道具和障碍会自动跟随车道中心。
  * - roadFarDepth：道路绘制到多远；数值越小，道路视觉上越短。
  * - roadFogStartDepth：道路从多远开始逐渐泛白；数值越小，白雾越靠近玩家。
  * - roadEndFogOpacity：道路尽头白雾浓度；建议范围 0.5～1。
+ * - laneDividerWidth：白色车道虚线宽度。
+ * - laneDashLength / laneDashGap：白色虚线的线段长度和间隔。
+ * - sideLaneWidthRatio / centerLaneWidthRatio：三车道宽度比例，当前为 0.32 / 0.36 / 0.32。
  * - bannerWidth：横幅宽度；1.0 左右约占一条赛道。
  * - roadsideBuildingScale：道路两侧建筑整体大小；建议范围 0.7～1.4。
  * - roadsideBuildingSpacing：相邻建筑的道路间距；越小排列越密。
@@ -25,7 +28,7 @@
  * - horizonFogOpacity：雾墙浓度；建议范围 0.65～1。
  * - horizonFogColor：偏蓝白的雾色 RGB。
  * - itemRevealStartDepth：物品离开云墙后开始显形的距离。
- * - magnetPullStartDepth：磁铁开始把近处门票吸向玩家的距离。
+ * - pickupTimingOffsetMs：拾取画面相对音乐的补偿；正数延后、负数提前。
  */
 export const VIEW_TUNING = Object.freeze({
   verticalFovDeg: 60,
@@ -35,15 +38,19 @@ export const VIEW_TUNING = Object.freeze({
   concertStageTopRatio: 0.035,
   concertStageHeightRatio: 0.28,
   roadVanishingRatio: 0.33,
-  roadHalfWidth: 5.3,
+  roadHalfWidth: 4.7,
   roadFarDepth: 42,
   roadFogStartDepth: 30,
   roadEndFogOpacity: 0.59,
-  laneSpacing: 2.55,
-  playerDepth: 5.25,
-  playerScale: 0.92,
+  laneDividerWidth: 0.09,
+  laneDashLength: 1.55,
+  laneDashGap: 1.15,
+  sideLaneWidthRatio: 0.32,
+  centerLaneWidthRatio: 0.36,
+  playerDepth: 5.5,
+  playerScale: 1.05,
   collectibleScale: 1,
-  obstacleScale: 1,
+  obstacleScale: 1.2,
   bannerWidth: 1.05,
   roadsideBuildingScale: 1,
   roadsideBuildingSpacing: 2.2,
@@ -54,6 +61,5 @@ export const VIEW_TUNING = Object.freeze({
   horizonFogColor: [231, 239, 255] as const,
   itemRevealStartDepth: 29,
   itemFullyVisibleDepth: 23,
-  magnetPullStartDepth: 15.5,
-  magnetPullEndDepth: 6.2,
+  pickupTimingOffsetMs: 0,
 });

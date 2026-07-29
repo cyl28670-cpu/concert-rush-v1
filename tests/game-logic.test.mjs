@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   TRACK_CONFIG,
-  MIN_HAZARD_GAP_SEC,
+  TRACKS,
   DIFFICULTY_TABLE,
   SPECTRUM_BANDS,
   clampLane,
@@ -11,14 +11,28 @@ import {
   computeEntryTier,
   computeMultiplier,
   createInitialGameState,
+  didCrossPickupTime,
   distanceAtTime,
   generateSupplementEvents,
+  getTrackConfig,
   isRunComplete,
   judgeAction,
   makeTrackEvents,
   recordJudgement,
   resolveCollision,
 } from "../app/game/logic.js";
+import { SPECTRUM_MAPPER_CONFIG } from "../app/spectrumMapper.js";
+import { createChartPlayer } from "../app/game/chartPlayer.js";
+import {
+  GENERATED_TRACK_EVENTS,
+  GENERATED_TRACK_META,
+} from "../app/game/generated-track-events.js";
+import {
+  GENERATED_TRACK_EVENTS as GENERATED_HARD_TRACK_EVENTS,
+  GENERATED_TRACK_META as GENERATED_HARD_TRACK_META,
+} from "../app/game/generated-track-events-hard.js";
+
+const LWH_ITEM_TYPES = ["ticket", "lightstick"];
 
 test("lane movement never leaves the three-lane course", () => {
   assert.equal(clampLane(-2), -1);
@@ -52,7 +66,7 @@ test("a consumed beat cannot be scored twice", () => {
 
 test("generated rows keep at least one safe lane", () => {
   const events = makeTrackEvents();
-  assert.ok(events.length >= 20);
+  assert.ok(events.length >= 40);
   for (const event of events) {
     const blocked = new Set(
       event.items
@@ -72,35 +86,122 @@ test("track uses exactly the three requested obstacle rules", () => {
   for (const event of events) {
     const hazard = event.items.find((item) => item.kind === "hazard");
     const reward = event.items.find((item) => item.kind === "collectible");
-    hazardTypes.add(hazard.type);
-    rewardTypes.add(reward.type);
-
-    if (event.action === "jump") assert.equal(hazard.type, "speaker");
-    if (event.action === "slide") assert.equal(hazard.type, "banner");
-    if (event.action === "left" || event.action === "right") {
-      assert.equal(hazard.type, "roadblock");
+    if (hazard) {
+      hazardTypes.add(hazard.type);
+      if (event.action === "jump") assert.equal(hazard.type, "speaker");
+      if (event.action === "slide") assert.equal(hazard.type, "banner");
+      if (event.action === "left" || event.action === "right") {
+        assert.equal(hazard.type, "roadblock");
+      }
     }
+    if (reward) rewardTypes.add(reward.type);
   }
 
   assert.deepEqual([...hazardTypes].sort(), ["banner", "roadblock", "speaker"]);
   assert.ok([...rewardTypes].every((type) =>
-    ["ticket", "magnet", "lightstick"].includes(type),
+    ["ticket", "lightstick"].includes(type),
+  ));
+  assert.ok(![...rewardTypes].some((type) =>
+    ["fragment", "shield", "dash"].includes(type),
   ));
 });
 
-test("obstacle rows are pre-spaced so a third row stays behind the cloud", () => {
+test("audio-generated chart stays dense through the end of the song", () => {
   const events = makeTrackEvents();
-  for (let index = 1; index < events.length; index += 1) {
-    const gap = events[index].time - events[index - 1].time;
-    assert.ok(gap >= MIN_HAZARD_GAP_SEC - 0.000001);
+  const hazards = events.filter((event) =>
+    event.items.some((item) => item.kind === "hazard"),
+  );
+  const collectibles = events.filter((event) =>
+    event.items.some((item) => item.kind === "collectible"),
+  );
+  assert.ok(hazards.length >= 48);
+  assert.ok(collectibles.length >= 80);
+  assert.ok(events[0].time >= 3.4);
+  assert.ok(events[events.length - 1].time > 40);
+
+  for (let index = 1; index < hazards.length; index += 1) {
+    assert.ok(hazards[index].time - hazards[index - 1].time >= 0.419);
   }
-  for (let index = 2; index < events.length; index += 1) {
-    const threeRowSpan = events[index].time - events[index - 2].time;
-    assert.ok(threeRowSpan >= MIN_HAZARD_GAP_SEC * 2 - 0.000001);
+  for (let index = 1; index < collectibles.length; index += 1) {
+    assert.ok(
+      collectibles[index].time - collectibles[index - 1].time >= 0.139,
+    );
   }
 });
 
-test("tickets are the score and timed powerups last five seconds", () => {
+test("obstacles and collectibles share one deterministic audio chart", () => {
+  const events = makeTrackEvents();
+  assert.notEqual(events, GENERATED_TRACK_EVENTS);
+  assert.deepEqual(events, GENERATED_TRACK_EVENTS);
+  assert.equal(
+    events.filter((event) =>
+      event.items.some((item) => item.kind === "hazard"),
+    ).length,
+    GENERATED_TRACK_META.hazardCount,
+  );
+  assert.equal(
+    events.filter((event) =>
+      event.items.some((item) => item.kind === "collectible"),
+    ).length,
+    GENERATED_TRACK_META.collectibleCount,
+  );
+  assert.equal(new Set(events.map((event) => event.id)).size, events.length);
+  assert.ok(
+    events.every(
+      (event, index) =>
+        index === 0 || event.time >= events[index - 1].time,
+    ),
+  );
+});
+
+test("generated grid times are musical while hit times use real onsets", () => {
+  for (const [events, meta] of [
+    [GENERATED_TRACK_EVENTS, GENERATED_TRACK_META],
+    [GENERATED_HARD_TRACK_EVENTS, GENERATED_HARD_TRACK_META],
+  ]) {
+    const halfBeat = 30 / meta.analyzedBpm;
+    const phase = meta.beatPhaseSec;
+
+    for (const event of events) {
+      const gridIndex = Math.round((event.gridTime - phase) / halfBeat);
+      const gridTime = phase + gridIndex * halfBeat;
+      assert.ok(Math.abs(event.gridTime - gridTime) < 0.0002);
+      assert.equal(event.time, event.hitTime);
+      assert.equal(event.time, event.onsetTime);
+      assert.ok(Math.abs(event.hitTime - event.gridTime) <= 0.105);
+      assert.equal(event.items[0].time, event.time);
+      assert.equal(event.items[0].hitTime, event.hitTime);
+      assert.equal(event.items[0].gridTime, event.gridTime);
+    }
+  }
+});
+
+test("song selection exposes a denser hard chart for the added track", () => {
+  assert.equal(TRACKS.length, 2);
+  const normal = getTrackConfig("run-to-you");
+  const hard = getTrackConfig("super-shy");
+  assert.equal(normal.difficultyLabel, "普通");
+  assert.equal(hard.difficultyLabel, "困难");
+  assert.match(hard.audioSrc, /obj_wo3DlMOG/);
+  assert.equal(GENERATED_HARD_TRACK_META.trackId, hard.id);
+  assert.ok(
+    GENERATED_HARD_TRACK_META.hazardCount >
+      GENERATED_TRACK_META.hazardCount,
+  );
+  assert.ok(
+    makeTrackEvents(hard).length > makeTrackEvents(normal).length,
+  );
+});
+
+test("pickup timing can be late by one frame but can never trigger early", () => {
+  assert.equal(didCrossPickupTime(9.95, 9.99, 10), false);
+  assert.equal(didCrossPickupTime(9.99, 10.01, 10), true);
+  assert.equal(didCrossPickupTime(9.99, 10.09, 10), true);
+  assert.equal(didCrossPickupTime(9.99, 10.091, 10), false);
+  assert.equal(didCrossPickupTime(10.01, 10.02, 10), false);
+});
+
+test("tickets are the score and the lightstick lasts five seconds", () => {
   let state = createInitialGameState();
   state = collectItem(state, "ticket", 1);
   assert.equal(state.tickets, 1);
@@ -115,11 +216,6 @@ test("tickets are the score and timed powerups last five seconds", () => {
 
   state = collectItem(state, "lightstick", 6);
   assert.equal(state.lightstickUntil, 13);
-
-  state = collectItem(state, "magnet", 5);
-  assert.equal(state.magnetUntil, 10);
-  state = collectItem(state, "magnet", 7);
-  assert.equal(state.magnetUntil, 15);
 });
 
 test("ticket score caps at the 100-ticket goal", () => {
@@ -150,15 +246,17 @@ test("distance counts down from 999 metres over the 45-second audio clock", () =
   assert.equal(isRunComplete(TRACK_CONFIG.durationSec), true);
 });
 
-test("entry tier at the finish follows the 10 / 30 / 50 ticket thresholds", () => {
-  assert.equal(computeEntryTier(0).id, "denied");
-  assert.equal(computeEntryTier(9).id, "denied");
-  assert.equal(computeEntryTier(10).id, "hilltop");
-  assert.equal(computeEntryTier(29).id, "hilltop");
-  assert.equal(computeEntryTier(30).id, "normal");
-  assert.equal(computeEntryTier(49).id, "normal");
-  assert.equal(computeEntryTier(50).id, "vip");
-  assert.equal(computeEntryTier(120).id, "vip");
+test("entry tier follows the 10 / 30 / 50 / 100 ticket milestones", () => {
+  assert.equal(computeEntryTier(0).id, "missed");
+  assert.equal(computeEntryTier(9).id, "missed");
+  assert.equal(computeEntryTier(10).id, "admitted");
+  assert.equal(computeEntryTier(29).id, "admitted");
+  assert.equal(computeEntryTier(30).id, "stands");
+  assert.equal(computeEntryTier(49).id, "stands");
+  assert.equal(computeEntryTier(50).id, "floor");
+  assert.equal(computeEntryTier(99).id, "floor");
+  assert.equal(computeEntryTier(100).id, "front-row");
+  assert.equal(computeEntryTier(120).id, "front-row");
 });
 
 // ─── New tests: Dynamic Difficulty & Spectrum System ────────────────────────
@@ -278,6 +376,43 @@ test("generateSupplementEvents increments event id counter", () => {
   const energy = { bass: 0.7, lowMid: 0.6, highMid: 0.3, high: 0.3 };
   const result = generateSupplementEvents(state, 5, energy);
   assert.ok(result.supplementEventId > 0);
+});
+
+test("spectrum mapper config only uses lwh collectible types", () => {
+  const mapped = Object.values(SPECTRUM_MAPPER_CONFIG.bandItemMap);
+  assert.ok(mapped.every((type) => LWH_ITEM_TYPES.includes(type)));
+  assert.ok(
+    SPECTRUM_MAPPER_CONFIG.buffPool.every((type) =>
+      LWH_ITEM_TYPES.includes(type),
+    ),
+  );
+  assert.ok(!mapped.includes("fragment"));
+  assert.ok(!SPECTRUM_MAPPER_CONFIG.buffPool.includes("magnet"));
+  assert.ok(!SPECTRUM_MAPPER_CONFIG.buffPool.includes("shield"));
+  assert.ok(!SPECTRUM_MAPPER_CONFIG.buffPool.includes("dash"));
+});
+
+test("chart player activates events inside the view window once", () => {
+  const chart = {
+    bpm: 128,
+    duration: 45,
+    events: [
+      { id: "a", kind: "collectible", type: "ticket", lane: 0, time: 5 },
+      { id: "b", kind: "collectible", type: "ticket", lane: 1, time: 12 },
+      { id: "c", kind: "collectible", type: "lightstick", lane: -1, time: 20 },
+    ],
+    stats: { totalEvents: 3 },
+  };
+  const player = createChartPlayer(chart);
+  const first = player.getEventsToActivate(4, 6.5);
+  assert.equal(first.length, 1);
+  assert.equal(first[0].id, "a");
+  assert.equal(player.getEventsToActivate(4, 6.5).length, 0);
+  const second = player.getEventsToActivate(10, 6.5);
+  assert.equal(second.length, 1);
+  assert.equal(second[0].id, "b");
+  player.reset();
+  assert.equal(player.getEventsToActivate(4, 6.5).length, 1);
 });
 
 test("spectrum bands define non-overlapping frequency ranges", () => {

@@ -1,23 +1,68 @@
-export const TRACK_CONFIG = Object.freeze({
-  id: "run-to-you",
-  title: "RUN TO YOU",
-  artist: "AHOF",
-  audioSrc: "/AHOF%20-%20RUN%20TO%20YOU.mp3",
+import { GENERATED_TRACK_EVENTS } from "./generated-track-events.js";
+import {
+  GENERATED_TRACK_EVENTS as GENERATED_HARD_TRACK_EVENTS,
+} from "./generated-track-events-hard.js";
+
+const SHARED_TRACK_CONFIG = Object.freeze({
   playbackStartSec: 0,
   durationSec: 45,
   finishDistance: 999,
   ticketGoal: 100,
   city: "星耀之城",
-  bpm: 128,
 });
+
+export const TRACKS = Object.freeze([
+  Object.freeze({
+    ...SHARED_TRACK_CONFIG,
+    id: "run-to-you",
+    title: "RUN TO YOU",
+    artist: "AHOF",
+    audioSrc: "/AHOF%20-%20RUN%20TO%20YOU.mp3",
+    bpm: 128,
+    difficulty: "normal",
+    difficultyLabel: "普通",
+    resultCopy: Object.freeze({
+      failureTitle: "赶路失败",
+      failureMessage: "途中撞到障碍，赶不上开场了",
+      shortageTitle: "没赶上",
+      shortageMessage: "门票不足 10 张，没能赶上演出",
+      successTitle: "抵达现场！",
+    }),
+  }),
+  Object.freeze({
+    ...SHARED_TRACK_CONFIG,
+    id: "super-shy",
+    title: "Super Shy",
+    artist: "NewJeans",
+    audioSrc:
+      "/assets/obj_wo3DlMOGwrbDjj7DisKw_55890904802_f2d4_d2bf_63b2_56ebb66815feb67c006bb6cc7015303f.mp3",
+    bpm: 155,
+    difficulty: "hard",
+    difficultyLabel: "困难",
+    resultCopy: Object.freeze({
+      failureTitle: "赶路失败",
+      failureMessage: "困难关卡撞到障碍，没能赶上开场",
+      shortageTitle: "没赶上",
+      shortageMessage: "门票不足 10 张，没能赶上演出",
+      successTitle: "抵达现场！",
+    }),
+  }),
+]);
+
+export const TRACK_CONFIG = TRACKS[0];
+
+export function getTrackConfig(trackId) {
+  return TRACKS.find((track) => track.id === trackId) ?? TRACK_CONFIG;
+}
 
 // ─── Entry tiers — 抵达终点按门票碎片数量判定入场等级 ──────────────────────────
 // 撞到障碍物 = 赶路失败（不进入该表，直接失败）。
 export const ENTRY_TIERS = Object.freeze([
-  { min: 50, id: "vip",     emoji: "⭐", label: "内场 VIP 票", seat: "最近距离接触舞台，最佳体验" },
-  { min: 30, id: "normal",  emoji: "🎫", label: "正常观众席",   seat: "视野不错，能看清舞台" },
-  { min: 10, id: "hilltop", emoji: "🏔️", label: "山顶看台票",   seat: "距离舞台最远，但能看到全场" },
-  { min: 0,  id: "denied",  emoji: "❌", label: "未能入场",     seat: "被拦在检票口外" },
+  { min: 100, id: "front-row", emoji: "🌟", label: "第一排", seat: "舞台最近距离，最佳观演位置" },
+  { min: 50, id: "floor", emoji: "⭐", label: "内场", seat: "近距离观看演出" },
+  { min: 30, id: "stands", emoji: "🎫", label: "看台", seat: "成功进入观众看台" },
+  { min: 10, id: "admitted", emoji: "✓", label: "成功入场", seat: "赶上了演出" },
+  { min: 0, id: "missed", emoji: "!", label: "没赶上", seat: "门票少于 10 张" },
 ]);
 
 /** Given collected tickets, return the entry tier reached at the finish line. */
@@ -37,13 +82,6 @@ export function computeEntryTier(tickets) {
  *   1.4 = sparse (relaxed)
  * Scales all stepBeats AND min gap in ACTION_PHRASES. */
 export const OBSTACLE_DENSITY = 0.8;
-
-/**
- * Minimum time between two obstacle rows.
- * At 1.95 seconds, the third row is still fully behind the cloud when the
- * nearest row reaches the player, so no hidden row needs to pop into view.
- */
-export const MIN_HAZARD_GAP_SEC = 1.95;
 
 // ─── Dynamic Difficulty System ──────────────────────────────────────────────
 
@@ -121,13 +159,13 @@ const REWARD_ROUTE = [
   "ticket",
   "lightstick",
   "ticket",
-  "magnet",
+  "ticket",
   "ticket",
   "ticket",
   "lightstick",
   "ticket",
   "ticket",
-  "magnet",
+  "ticket",
   "ticket",
   "lightstick",
   "ticket",
@@ -143,7 +181,38 @@ export function computeMultiplier(combo) {
   return Math.min(8, 1 + Math.floor(Math.max(0, combo) / 4));
 }
 
+/**
+ * True only on the frame where the audio clock crosses a pickup time.
+ * The late grace handles a slow/dropped frame; it never permits an early hit.
+ */
+export function didCrossPickupTime(
+  previousTime,
+  currentTime,
+  hitTime,
+  lateGraceSec = 0.09,
+) {
+  return (
+    previousTime < hitTime &&
+    currentTime >= hitTime &&
+    currentTime - hitTime <= lateGraceSec
+  );
+}
+
 export function makeTrackEvents(config = TRACK_CONFIG) {
+  const generatedChart =
+    config.id === "super-shy"
+      ? GENERATED_HARD_TRACK_EVENTS
+      : config.id === "run-to-you"
+        ? GENERATED_TRACK_EVENTS
+        : null;
+
+  if (generatedChart) {
+    return generatedChart.map((event) => ({
+      ...event,
+      items: event.items.map((item) => ({ ...item })),
+    }));
+  }
+
   const beat = 60 / config.bpm;
   let routeLane = 0;
 
@@ -159,22 +228,23 @@ export function makeTrackEvents(config = TRACK_CONFIG) {
     })),
   ).sort((a, b) => a.time - b.time);
 
-  // 2. Enforce runner-style spacing so every row can emerge from the cloud.
-  const MIN_GAP = Math.max(
-    0.44 * OBSTACLE_DENSITY,
-    MIN_HAZARD_GAP_SEC,
-  );
-  const spaced = [];
+  // 2. Keep main's beat-synced chart times; only drop rows that collide
+  //    within the reaction floor (scaled by density). Do not stretch timing —
+  //    stretching would destroy the music-synced phrasing.
+  const MIN_GAP = 0.44 * OBSTACLE_DENSITY;
+  const filtered = [];
   let lastTime = -10;
   for (const sa of scriptedActions) {
-    const scheduledTime = Math.max(sa.time, lastTime + MIN_GAP);
-    if (scheduledTime >= config.durationSec - 0.6) break;
-    spaced.push({ ...sa, time: scheduledTime });
-    lastTime = scheduledTime;
+    if (sa.time - lastTime >= MIN_GAP) {
+      filtered.push(sa);
+      lastTime = sa.time;
+    }
   }
 
-  // 3. Build events with hazards and collectibles
-  return spaced.map((scripted, index) => {
+  // 3. Build events with lwh obstacle/collectible types only:
+  //    hazards  → speaker / banner / roadblock
+  //    rewards  → ticket / lightstick
+  return filtered.map((scripted, index) => {
     let action = scripted.action;
     const oldLane = routeLane;
 
@@ -269,7 +339,6 @@ export function createInitialGameState() {
     combo: 0,
     multiplier: 1,
     maxMultiplier: 1,
-    magnetUntil: 0,
     lightstickUntil: 0,
     jumpStart: -10,
     slideUntil: 0,
@@ -321,7 +390,7 @@ export function recordJudgement(state, grade, time) {
  * Spectrum bands influence reward types:
  *   bass  peaks → more tickets
  *   high-frequency peaks → more lightsticks
- *   high difficulty → chance of magnet/lightstick powerups
+ *   high difficulty → chance of an extra lightstick powerup
  *
  * Note: Hazards are NOT generated here — they come exclusively from
  * the pre-choreographed ACTION_PHRASES to keep prompt-action-obstacle
@@ -362,12 +431,11 @@ export function generateSupplementEvents(state, time, spectrumBands) {
   // Higher difficulty + some spectrum energy → chance of a bonus powerup
   const totalEnergy = bass + lowMid + highMid + high;
   if (totalEnergy > 0.5 && Math.random() < diff.extraHazardChance * 0.5) {
-    const buffType = Math.random() < 0.5 ? "magnet" : "lightstick";
     const buffLane = [-1, 0, 1][Math.floor(Math.random() * 3)];
     events.push({
       id: `supp-buff-${idCounter++}`,
       kind: "collectible",
-      type: buffType,
+      type: "lightstick",
       lane: buffLane,
       time: time + leadSec + 1.0,
     });
@@ -387,8 +455,6 @@ export function collectItem(state, type, time) {
     next.score += 120;
   } else if (type === "lightstick") {
     next.lightstickUntil = Math.max(time, state.lightstickUntil) + 5;
-  } else if (type === "magnet") {
-    next.magnetUntil = Math.max(time, state.magnetUntil) + 5;
   }
 
   return next;

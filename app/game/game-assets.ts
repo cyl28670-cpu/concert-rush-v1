@@ -15,7 +15,6 @@ export const RUN_IMAGE_FILES = Object.freeze({
   playerSlide: "player_slide.png",
   ticket: "collectible_lightstick.png",
   lightstick: "collectible_ticket.png",
-  magnet: "buff_magnet.png",
   roadblock: "obstacle_construction_sign.png",
   speaker: "obstacle_speaker.png",
 });

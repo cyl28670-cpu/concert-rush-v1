@@ -8,14 +8,15 @@ import {
 } from "react";
 import {
   TRACK_CONFIG,
+  TRACKS,
   SPECTRUM_BANDS,
   clampLane,
   collectItem,
   computeEntryTier,
   computeMultiplier,
   createInitialGameState,
+  didCrossPickupTime,
   distanceAtTime,
-  generateSupplementEvents,
   isRunComplete,
   judgeAction,
   makeTrackEvents,
@@ -34,9 +35,9 @@ type Screen =
   | "countdown"
   | "playing"
   | "paused"
-  | "victory"
   | "result";
 type Action = "left" | "right" | "jump" | "slide";
+type TrackConfig = (typeof TRACKS)[number];
 
 type SavedProgress = {
   bestTickets: number;
@@ -48,7 +49,6 @@ type UiSnapshot = {
   distance: number;
   tickets: number;
   combo: number;
-  magnet: number;
   lightstick: number;
   judgement: string | null;
 };
@@ -60,38 +60,75 @@ type ActiveItem = {
   type: string;
   lane: number;
   time: number;
+  gridTime?: number;
+  hitTime?: number;
 };
 type BaseGameState = ReturnType<typeof createInitialGameState>;
+type PickupParticle = {
+  x: number;
+  y: number;
+  vx: number;
+  vy: number;
+  life: number;
+  maxLife: number;
+  color: string;
+  size: number;
+};
+type PickupText = {
+  x: number;
+  y: number;
+  vy: number;
+  life: number;
+  maxLife: number;
+  text: string;
+  color: string;
+  size: number;
+};
+type PendingPickup = {
+  type: string;
+  combo: number;
+  beatSync: "perfect" | "great" | "good" | null;
+};
 type GameRuntime = Omit<BaseGameState, "activeItems" | "judgement"> & {
   activeItems: ActiveItem[];
   judgement: string | null;
+  pickupParticles: PickupParticle[];
+  pickupTexts: PickupText[];
+  pendingPickups: PendingPickup[];
+  pickupFlash: number;
+  pickupGlow: number;
+  pickupShake: number;
 };
 
 const STORAGE_KEY = "concert-rush-v1-progress";
+const PICKUP_COLORS: Record<string, string> = {
+  ticket: "#ff75bd",
+  lightstick: "#61dcff",
+};
 
 // ── Tunable View Parameters ────────────────────────────────────────────────
 /** How many seconds ahead obstacles activate and become visible.
  *  Higher = obstacles appear further away, more reaction time.
- *  At 7.2s, two obstacle rows can already wait behind the horizon clouds.
- *  At 4.1s (old default), they pop in much closer. */
-const VIEW_DISTANCE_SEC = 7.2;
+ *  Keep main's 6.5s so dense beat-synced rows fade in at the horizon. */
+const VIEW_DISTANCE_SEC = 6.5;
 /** Max Z-depth for rendering (derived from VIEW_DISTANCE_SEC). */
 const MAX_RENDER_Z = 5.4 + VIEW_DISTANCE_SEC * 8.4;
-const EVENTS = makeTrackEvents();
 
 // First appearance of each hazard type → show a gesture arrow hint above it.
 // Maps the hazard item id to the action the player must perform.
-const HAZARD_HINTS: Map<string, Action> = (() => {
+function makeHazardHints(events: ReturnType<typeof makeTrackEvents>) {
   const seen = new Set<string>();
   const hints = new Map<string, Action>();
-  for (const event of EVENTS) {
+  for (const event of events) {
     const hazard = event.items.find((item) => item.kind === "hazard");
     if (!hazard || seen.has(hazard.type)) continue;
     seen.add(hazard.type);
     hints.set(hazard.id, event.action as Action);
   }
   return hints;
-})();
+}
+const DEFAULT_EVENTS = makeTrackEvents(TRACK_CONFIG);
+const DEFAULT_HAZARD_HINTS = makeHazardHints(DEFAULT_EVENTS);
 const ASSET = ASSET_BASE_URL;
 const TICKET_SPRITE = RUN_IMAGE_FILES.ticket;
 const LIGHTSTICK_SPRITE = RUN_IMAGE_FILES.lightstick;
@@ -114,7 +151,14 @@ const DEFAULT_PROGRESS: SavedProgress = {
 };
 
 function makeRuntimeState() {
-  return createInitialGameState() as GameRuntime;
+  return Object.assign(createInitialGameState(), {
+    pickupParticles: [] as PickupParticle[],
+    pickupTexts: [] as PickupText[],
+    pendingPickups: [] as PendingPickup[],
+    pickupFlash: 0,
+    pickupGlow: 0,
+    pickupShake: 0,
+  }) as GameRuntime;
 }
 
 const SPRITE_FILES = {
@@ -127,7 +171,6 @@ const SPRITE_FILES = {
   playerSlide: RUN_IMAGE_FILES.playerSlide,
   ticket: RUN_IMAGE_FILES.ticket,
   lightstick: RUN_IMAGE_FILES.lightstick,
-  magnet: RUN_IMAGE_FILES.magnet,
   roadblock: RUN_IMAGE_FILES.roadblock,
   speaker: RUN_IMAGE_FILES.speaker,
 };
@@ -155,7 +198,6 @@ function initialUi(): UiSnapshot {
     distance: 0,
     tickets: 0,
     combo: 0,
-    magnet: 0,
     lightstick: 0,
     judgement: null,
   };
@@ -163,18 +205,27 @@ function initialUi(): UiSnapshot {
 
 function HomeScreen({
   progress,
+  tracks,
+  selectedTrack,
+  onSelectTrack,
   onStart,
   onRules,
   onSoon,
   onToggleMute,
 }: {
   progress: SavedProgress;
+  tracks: readonly TrackConfig[];
+  selectedTrack: TrackConfig;
+  onSelectTrack: (trackId: string) => void;
   onStart: () => void;
   onRules: () => void;
   onSoon: (label: string) => void;
   onToggleMute: () => void;
 }) {
-  const pct = Math.min(100, (progress.bestTickets / TRACK_CONFIG.ticketGoal) * 100);
+  const pct = Math.min(
+    100,
+    (progress.bestTickets / selectedTrack.ticketGoal) * 100,
+  );
 
   return (
     <section className="home-screen" data-testid="home-screen">
@@ -202,7 +253,7 @@ function HomeScreen({
           <p>
             ♫　最高门票：
             <strong className="pink">
-              {progress.bestTickets}/{TRACK_CONFIG.ticketGoal}
+              {progress.bestTickets}/{selectedTrack.ticketGoal}
             </strong>
           </p>
           <div className="home-progress" aria-label="最高门票进度">
@@ -210,22 +261,34 @@ function HomeScreen({
           </div>
         </div>
 
+        <div className="track-select" role="radiogroup" aria-label="选择歌曲">
+          {tracks.map((track) => {
+            const selected = track.id === selectedTrack.id;
+            return (
+              <button
+                key={track.id}
+                type="button"
+                role="radio"
+                aria-checked={selected}
+                className={selected ? "selected" : ""}
+                onClick={() => onSelectTrack(track.id)}
+              >
+                <span>
+                  <b>{track.title}</b>
+                  <small>{track.artist}</small>
+                </span>
+                <em className={track.difficulty}>
+                  {track.difficultyLabel}
+                </em>
+              </button>
+            );
+          })}
+        </div>
+
         <div className="home-scene" aria-hidden="true">
-          <img src={`${ASSET}run_bg_city_a.png`} alt="" />
-          <div className="home-road" />
           <img
-            className="home-runner"
-            src={assetUrl("player_fan.png")}
-            alt=""
-          />
-          <img
-            className="home-ticket"
-            src={`${ASSET}${TICKET_SPRITE}`}
-            alt=""
-          />
-          <img
-            className="home-stick"
-            src={`${ASSET}${LIGHTSTICK_SPRITE}`}
+            className="home-cover"
+            src={`${ASSET}home-song-cover-v2.png`}
             alt=""
           />
         </div>
@@ -263,10 +326,6 @@ function RulesModal({ onClose }: { onClose: () => void }) {
             <span><b>门票 = 得分</b>在歌曲结束前尽量收集 100 张。</span>
           </p>
           <p>
-            <img src={`${ASSET}buff_magnet.png`} alt="" />
-            <span><b>磁铁 · 5 秒</b>自动吸取赛道上的门票。</span>
-          </p>
-          <p>
             <img src={`${ASSET}${LIGHTSTICK_SPRITE}`} alt="" />
             <span><b>应援棒 · 5 秒</b>开启保护罩，碰到障碍也不会失败。</span>
           </p>
@@ -284,12 +343,13 @@ function RulesModal({ onClose }: { onClose: () => void }) {
           </p>
         </div>
         <div className="rule-tiers">
-          <p>抵达终点按门票碎片数量定席位：</p>
+          <p>抵达终点按门票数量解锁位置：</p>
           <ul>
-            <li>⭐ 50 张以上 · 内场 VIP</li>
-            <li>🎫 30–49 张 · 正常观众席</li>
-            <li>🏔️ 10–29 张 · 山顶看台</li>
-            <li>❌ 不足 10 张 · 未能入场</li>
+            <li>🌟 100 张 · 第一排</li>
+            <li>⭐ 50–99 张 · 内场</li>
+            <li>🎫 30–49 张 · 看台</li>
+            <li>✓ 10–29 张 · 成功入场</li>
+            <li>! 不足 10 张 · 没赶上</li>
           </ul>
           <p className="rule-tier-warn">💀 途中撞到任何障碍物 = 赶路失败</p>
         </div>
@@ -313,18 +373,14 @@ function formatPowerupTime(seconds: number) {
 
 function RunHud({
   ui,
+  track,
   onPause,
 }: {
   ui: UiSnapshot;
+  track: TrackConfig;
   onPause: () => void;
 }) {
   const activePowerups = [
-    {
-      id: "magnet",
-      label: "磁铁",
-      icon: "buff_magnet.png",
-      seconds: ui.magnet,
-    },
     {
       id: "lightstick",
       label: "应援棒",
@@ -340,7 +396,7 @@ function RunHud({
           <img src={`${ASSET}${TICKET_SPRITE}`} alt="" />
           <span>
             <small>门票 / 得分</small>
-            <b>{ui.tickets}/{TRACK_CONFIG.ticketGoal}</b>
+            <b>{ui.tickets}/{track.ticketGoal}</b>
           </span>
         </div>
       </header>
@@ -369,13 +425,13 @@ function RunHud({
   );
 }
 
-function RunFooter({ ui }: { ui: UiSnapshot }) {
-  const pct = Math.min(100, (ui.distance / TRACK_CONFIG.finishDistance) * 100);
+function RunFooter({ ui, track }: { ui: UiSnapshot; track: TrackConfig }) {
+  const pct = Math.min(100, (ui.distance / track.finishDistance) * 100);
   return (
     <footer className="run-footer">
       <div className="distance-row">
         <span>🏁 距离目的地还有</span>
-        <b>{Math.max(0, Math.ceil(TRACK_CONFIG.finishDistance - ui.distance))}米</b>
+        <b>{Math.max(0, Math.ceil(track.finishDistance - ui.distance))}米</b>
         <span>演唱会 🚩</span>
       </div>
       <div className="route-bar"><i style={{ width: `${pct}%` }} /></div>
@@ -391,6 +447,7 @@ function ResultModal({
   ui,
   success,
   progress,
+  track,
   onAgain,
   onHome,
   onSoon,
@@ -398,6 +455,7 @@ function ResultModal({
   ui: UiSnapshot;
   success: boolean;
   progress: SavedProgress;
+  track: TrackConfig;
   onAgain: () => void;
   onHome: () => void;
   onSoon: (label: string) => void;
@@ -405,57 +463,72 @@ function ResultModal({
   // 抵达终点 (success) → 按门票碎片数量判定入场等级；途中撞障碍 → 赶路失败。
   const tier = computeEntryTier(ui.tickets);
   const reachedFinish = success;
-  const admitted = reachedFinish && tier.id !== "denied";
-  const pct = Math.min(100, (ui.tickets / TRACK_CONFIG.ticketGoal) * 100);
+  const admitted = reachedFinish && tier.id !== "missed";
+  const milestones = [
+    { start: 0, end: 10, value: 10, label: "入场" },
+    { start: 10, end: 30, value: 30, label: "看台" },
+    { start: 30, end: 50, value: 50, label: "内场" },
+    { start: 50, end: 100, value: 100, label: "第一排" },
+  ];
 
   const title = !reachedFinish
-    ? "赶路失败"
+    ? track.resultCopy.failureTitle
     : admitted
-      ? "抵达现场！"
-      : "被拦在门外";
-  const kicker = !reachedFinish
-    ? "途中撞到障碍，赶不上开场了"
-    : admitted
-      ? `${tier.emoji} ${tier.label}`
-      : "门票碎片不足 10 张，没能入场";
-
+      ? track.resultCopy.successTitle
+      : track.resultCopy.shortageTitle;
   return (
     <div className="overlay result-overlay" role="dialog" aria-modal="true">
       <section className={`result-panel ${admitted ? "success" : "failed"}`}>
-        {admitted ? (
-          <img
-            className="result-badge"
-            src={`${ASSET}result_badge_success.png`}
-            alt=""
-          />
-        ) : (
-          <div className="fail-badge">{reachedFinish ? "✕" : "!"}</div>
-        )}
+        <div className="result-mark" aria-hidden="true">
+          {admitted ? (
+            <img
+              className="result-badge"
+              src={`${ASSET}result_badge_success.png`}
+              alt=""
+            />
+          ) : (
+            <div className="fail-badge">{reachedFinish ? "✕" : "!"}</div>
+          )}
+        </div>
         <h2>{title}</h2>
-        <p className="result-kicker">{kicker}</p>
-        {reachedFinish && (
-          <div className="entry-tier">
-            <b>{tier.emoji} {tier.label}</b>
-            <span>{tier.seat}</span>
-          </div>
-        )}
         <div className="result-stats">
           <span><small>本局门票 / 得分</small><b>{ui.tickets}</b></span>
           <span><small>历史最高</small><b>{progress.bestTickets}</b></span>
         </div>
-        <div className="unlock-card">
-          <span>
-            <b>入场门槛</b>
-            <strong>{ui.tickets} 张</strong>
-          </span>
-          <div><i style={{ width: `${pct}%` }} /></div>
-          <p>
-            {tier.id === "vip"
-              ? "内场 VIP 达成！继续冲击更高排名"
-              : reachedFinish
-                ? `再收集 ${Math.max(1, (tier.id === "denied" ? 10 : tier.id === "hilltop" ? 30 : 50) - ui.tickets)} 张可升到下一档`
-                : `还差 ${Math.max(0, 10 - ui.tickets)} 张才能入场`}
-          </p>
+        <div className="milestone-card">
+          <div className="milestone-summary">
+            <b>{tier.emoji} {tier.label}</b>
+            <span>{ui.tickets} / {track.ticketGoal} 张</span>
+          </div>
+          <div className="milestone-bar" aria-label={`门票进度 ${ui.tickets} 张`}>
+            {milestones.map((milestone) => {
+              const fill = Math.max(
+                0,
+                Math.min(
+                  100,
+                  ((ui.tickets - milestone.start) /
+                    (milestone.end - milestone.start)) *
+                    100,
+                ),
+              );
+              return (
+                <span
+                  key={milestone.value}
+                  style={{ flexGrow: milestone.end - milestone.start }}
+                >
+                  <i style={{ width: `${fill}%` }} />
+                </span>
+              );
+            })}
+          </div>
+          <div className="milestone-labels">
+            {milestones.map((milestone) => (
+              <span key={milestone.value}>
+                <b>{milestone.value}</b>
+                <small>{milestone.label}</small>
+              </span>
+            ))}
+          </div>
         </div>
         <div className="result-actions">
           <button className="pixel-primary" onClick={onAgain}>↻ 再来一局</button>
@@ -467,51 +540,100 @@ function ResultModal({
   );
 }
 
-// ─── Procedural Audio Engine ─────────────────────────────────────────────────
+// ─── Procedural Audio Engine (from main) ─────────────────────────────────────
 
-/** Manages Web Audio API: spectrum analysis, hit sounds, and Miss filter penalty.
- *  All sounds are generated procedurally — no extra audio files required. */
+/** Manages Web Audio API: BGM routing, spectrum analysis, hit sounds, Miss filter.
+ *  Hit / combo sounds are generated procedurally — no extra audio files required. */
 class AudioManager {
   ctx: AudioContext | null = null;
   source: MediaElementAudioSourceNode | null = null;
   analyser: AnalyserNode | null = null;
   filter: BiquadFilterNode | null = null;
+  /** BGM level after spectrum analysis — mute must go through here once MediaElementSource is connected. */
+  masterGain: GainNode | null = null;
+  /** Bus for procedural SFX so mute also silences hit/combo tones. */
+  sfxGain: GainNode | null = null;
   filterActive = false;
   freqData: Uint8Array | null = null;
   audioEl: HTMLAudioElement | null = null;
+  collectBuffer: AudioBuffer | null = null;
+  muted = false;
+  bgmVolume = 0.58;
+
+  async loadCollectSfx() {
+    if (!this.ctx || this.collectBuffer) return;
+    try {
+      const response = await fetch("/assets/coin-pickup.mp3");
+      if (!response.ok) return;
+      const audioData = await response.arrayBuffer();
+      this.collectBuffer = await this.ctx.decodeAudioData(audioData);
+    } catch {
+      // The procedural pickup tones below remain available as a fallback.
+    }
+  }
 
   /**
    * Connect the <audio> element into the Web Audio graph.
-   * The chain: audioEl → source → filter → analyser → destination
+   * Chain: audioEl → source → filter → analyser → masterGain → destination
+   *                                        sfxGain ↗
    */
   async init(audioEl: HTMLAudioElement) {
-    if (this.ctx) return; // already initialized
     this.audioEl = audioEl;
+    if (this.ctx) {
+      await this.resume();
+      this.applyVolumes();
+      return;
+    }
     const ctx = new AudioContext();
-    // Resume if suspended (browser autoplay policy)
     if (ctx.state === "suspended") await ctx.resume();
 
     const source = ctx.createMediaElementSource(audioEl);
     const filter = ctx.createBiquadFilter();
     const analyser = ctx.createAnalyser();
+    const masterGain = ctx.createGain();
+    const sfxGain = ctx.createGain();
 
     filter.type = "lowpass";
-    filter.frequency.value = 20000; // fully open by default
+    filter.frequency.value = 20000;
     filter.Q.value = 1;
 
     analyser.fftSize = 256;
     analyser.smoothingTimeConstant = 0.8;
 
-    // Connect: source → filter → analyser → destination
     source.connect(filter);
     filter.connect(analyser);
-    analyser.connect(ctx.destination);
+    analyser.connect(masterGain);
+    masterGain.connect(ctx.destination);
+    sfxGain.connect(ctx.destination);
 
     this.ctx = ctx;
     this.source = source;
     this.filter = filter;
     this.analyser = analyser;
+    this.masterGain = masterGain;
+    this.sfxGain = sfxGain;
     this.freqData = new Uint8Array(analyser.frequencyBinCount);
+    // Element volume stays at 1; GainNodes own audible level.
+    audioEl.volume = 1;
+    this.applyVolumes();
+  }
+
+  async resume() {
+    if (this.ctx?.state === "suspended") await this.ctx.resume();
+  }
+
+  setMuted(muted: boolean) {
+    this.muted = muted;
+    this.applyVolumes();
+  }
+
+  applyVolumes() {
+    const bgm = this.muted ? 0 : this.bgmVolume;
+    const sfx = this.muted ? 0 : 1;
+    if (this.masterGain) this.masterGain.gain.value = bgm;
+    if (this.sfxGain) this.sfxGain.gain.value = sfx;
+    // Before the graph exists, fall back to the media element volume.
+    if (this.audioEl && !this.masterGain) this.audioEl.volume = bgm;
   }
 
   /** Read spectrum data. Returns average energy value across the frequency range. */
@@ -542,9 +664,16 @@ class AudioManager {
     return { energy, bands };
   }
 
+  private sfxDestination(): AudioNode | null {
+    if (!this.ctx || this.muted) return null;
+    if (this.ctx.state === "suspended") void this.ctx.resume();
+    return this.sfxGain ?? this.ctx.destination;
+  }
+
   /** Play a procedural hit sound based on judgement grade. */
   playHit(grade: string) {
-    if (!this.ctx || this.ctx.state === "suspended") return;
+    const dest = this.sfxDestination();
+    if (!this.ctx || !dest) return;
 
     const ctx = this.ctx;
     const now = ctx.currentTime;
@@ -553,10 +682,9 @@ class AudioManager {
     const gain = ctx.createGain();
 
     osc.connect(gain);
-    gain.connect(ctx.destination);
+    gain.connect(dest);
 
     if (grade === "Perfect") {
-      // Bright staccato: high sine + triangle harmonics
       osc.type = "sine";
       osc.frequency.setValueAtTime(880, now);
       osc.frequency.exponentialRampToValueAtTime(1320, now + 0.04);
@@ -566,7 +694,6 @@ class AudioManager {
       osc.start(now);
       osc.stop(now + 0.16);
     } else if (grade === "Great") {
-      // Warm mid tone
       osc.type = "triangle";
       osc.frequency.setValueAtTime(660, now);
       osc.frequency.exponentialRampToValueAtTime(880, now + 0.06);
@@ -575,7 +702,6 @@ class AudioManager {
       osc.start(now);
       osc.stop(now + 0.13);
     } else if (grade === "Good") {
-      // Subtle low tick
       osc.type = "sine";
       osc.frequency.value = 440;
       gain.gain.setValueAtTime(0.06, now);
@@ -605,13 +731,14 @@ class AudioManager {
 
   /** Play a special sound when combo hits a milestone. */
   playComboMilestone(milestone: number) {
-    if (!this.ctx || this.ctx.state === "suspended") return;
+    const dest = this.sfxDestination();
+    if (!this.ctx || !dest) return;
     const ctx = this.ctx;
     const now = ctx.currentTime;
     const osc = ctx.createOscillator();
     const gain = ctx.createGain();
     osc.connect(gain);
-    gain.connect(ctx.destination);
+    gain.connect(dest);
     osc.type = "sine";
     const baseFreq = milestone >= 32 ? 1200 : milestone >= 16 ? 900 : 660;
     osc.frequency.setValueAtTime(baseFreq, now);
@@ -622,13 +749,122 @@ class AudioManager {
     osc.stop(now + 0.32);
   }
 
+  private tone(
+    dest: AudioNode,
+    type: OscillatorType,
+    freqStart: number,
+    freqEnd: number,
+    peak: number,
+    duration: number,
+    delay = 0,
+  ) {
+    if (!this.ctx) return;
+    const ctx = this.ctx;
+    const now = ctx.currentTime + delay;
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+    osc.type = type;
+    osc.connect(gain);
+    gain.connect(dest);
+    osc.frequency.setValueAtTime(Math.max(40, freqStart), now);
+    osc.frequency.exponentialRampToValueAtTime(
+      Math.max(40, freqEnd),
+      now + duration,
+    );
+    gain.gain.setValueAtTime(0.0001, now);
+    gain.gain.exponentialRampToValueAtTime(peak, now + 0.012);
+    gain.gain.exponentialRampToValueAtTime(0.0001, now + duration);
+    osc.start(now);
+    osc.stop(now + duration + 0.02);
+  }
+
+  /**
+   * Collectible / powerup pickup sounds (ticket · lightstick).
+   * Main only had judgement hit tones; these fill the item-SFX gap from the rules.
+   */
+  playCollect(
+    type: string,
+    combo: number,
+    beatSync: "perfect" | "great" | "good" | null,
+  ) {
+    const dest = this.sfxDestination();
+    if (!this.ctx || !dest) return;
+    const ctx = this.ctx;
+    const now = ctx.currentTime;
+
+    if (this.collectBuffer) {
+      const source = ctx.createBufferSource();
+      const gain = ctx.createGain();
+      const filter = ctx.createBiquadFilter();
+      const comboSemitones = Math.min(8, Math.floor(combo / 4));
+      const comboRate = 2 ** (comboSemitones / 12);
+      source.buffer = this.collectBuffer;
+
+      if (type === "lightstick") {
+        source.playbackRate.value = 1.12 * comboRate;
+        filter.type = "highpass";
+        filter.frequency.value = 620;
+        gain.gain.value = beatSync === "perfect" ? 0.78 : 0.68;
+      } else {
+        source.playbackRate.value = comboRate;
+        filter.type = "allpass";
+        gain.gain.value = beatSync === "perfect" ? 0.9 : 0.78;
+      }
+
+      source.connect(filter);
+      filter.connect(gain);
+      gain.connect(dest);
+      source.start(now);
+      return;
+    }
+
+    if (type === "ticket") {
+      // Bright coin ping
+      this.tone(dest, "sine", 980, 1560, 0.1, 0.12);
+      this.tone(dest, "triangle", 1320, 1980, 0.05, 0.1, 0.02);
+      return;
+    }
+
+    if (type === "lightstick") {
+      // Punchy kick + shimmering pad (crowd/chorus vibe)
+      this.tone(dest, "sine", 140, 55, 0.14, 0.18);
+      this.tone(dest, "triangle", 220, 110, 0.06, 0.16, 0.02);
+      this.tone(dest, "sine", 660, 880, 0.05, 0.35, 0.05);
+      this.tone(dest, "sine", 990, 1320, 0.04, 0.4, 0.1);
+      // Soft noise burst for “crowd”
+      const bufferSize = Math.floor(ctx.sampleRate * 0.18);
+      const buffer = ctx.createBuffer(1, bufferSize, ctx.sampleRate);
+      const data = buffer.getChannelData(0);
+      for (let i = 0; i < bufferSize; i += 1) {
+        data[i] = (Math.random() * 2 - 1) * (1 - i / bufferSize);
+      }
+      const noise = ctx.createBufferSource();
+      const noiseFilter = ctx.createBiquadFilter();
+      const noiseGain = ctx.createGain();
+      noise.buffer = buffer;
+      noiseFilter.type = "bandpass";
+      noiseFilter.frequency.value = 1200;
+      noiseFilter.Q.value = 0.7;
+      noise.connect(noiseFilter);
+      noiseFilter.connect(noiseGain);
+      noiseGain.connect(dest);
+      noiseGain.gain.setValueAtTime(0.04, now);
+      noiseGain.gain.exponentialRampToValueAtTime(0.0001, now + 0.18);
+      noise.start(now);
+      noise.stop(now + 0.2);
+    }
+  }
+
   destroy() {
     this.ctx?.close();
     this.ctx = null;
     this.source = null;
     this.filter = null;
     this.analyser = null;
+    this.masterGain = null;
+    this.sfxGain = null;
     this.freqData = null;
+    this.collectBuffer = null;
   }
 }
 
@@ -639,36 +875,53 @@ export default function ConcertRushGame() {
   const audioManagerRef = useRef<AudioManager>(new AudioManager());
   const spritesRef = useRef<SpriteMap>({});
   const runRef = useRef<GameRuntime>(makeRuntimeState());
+  const selectedTrackRef = useRef<TrackConfig>(TRACK_CONFIG);
+  const eventsRef = useRef(DEFAULT_EVENTS);
+  const hazardHintsRef = useRef(DEFAULT_HAZARD_HINTS);
   const screenRef = useRef<Screen>("home");
   const savedRef = useRef<SavedProgress>(DEFAULT_PROGRESS);
   const countdownTimers = useRef<number[]>([]);
-  const victoryTimer = useRef<number | null>(null);
   const pointerStart = useRef({ x: 0, y: 0 });
-  const magnetTargetLanes = useRef<Map<string, number>>(new Map());
   const lastUiPush = useRef(0);
-  const lastSpectrumSpawn = useRef(0);
 
   const [screen, setScreenState] = useState<Screen>("home");
   const [countdown, setCountdown] = useState(3);
   const [showRules, setShowRules] = useState(false);
   const [toast, setToast] = useState<string | null>(null);
   const [success, setSuccess] = useState(false);
+  const [selectedTrackId, setSelectedTrackId] = useState(TRACK_CONFIG.id);
   const [progress, setProgress] =
     useState<SavedProgress>(DEFAULT_PROGRESS);
   const [ui, setUi] = useState<UiSnapshot>(() => initialUi());
+  const selectedTrack =
+    TRACKS.find((track) => track.id === selectedTrackId) ?? TRACK_CONFIG;
 
   const setScreen = useCallback((next: Screen) => {
     screenRef.current = next;
     setScreenState(next);
   }, []);
 
+  const selectTrack = useCallback((trackId: string) => {
+    if (screenRef.current !== "home") return;
+    const track = TRACKS.find((candidate) => candidate.id === trackId);
+    if (!track) return;
+    selectedTrackRef.current = track;
+    eventsRef.current = makeTrackEvents(track);
+    hazardHintsRef.current = makeHazardHints(eventsRef.current);
+    setSelectedTrackId(track.id);
+    const audio = audioRef.current;
+    if (audio) {
+      audio.pause();
+      audio.currentTime = 0;
+    }
+  }, []);
+
   const pushUi = useCallback((trackTime: number) => {
     const run = runRef.current;
     setUi({
-      distance: distanceAtTime(trackTime),
+      distance: distanceAtTime(trackTime, selectedTrackRef.current),
       tickets: run.tickets,
       combo: run.combo,
-      magnet: Math.max(0, run.magnetUntil - trackTime),
       lightstick: Math.max(0, run.lightstickUntil - trackTime),
       judgement:
         run.judgementUntil > trackTime ? run.judgement : null,
@@ -678,13 +931,6 @@ export default function ConcertRushGame() {
   const clearCountdownTimers = useCallback(() => {
     countdownTimers.current.forEach((timer) => window.clearTimeout(timer));
     countdownTimers.current = [];
-  }, []);
-
-  const clearVictoryTimer = useCallback(() => {
-    if (victoryTimer.current !== null) {
-      window.clearTimeout(victoryTimer.current);
-      victoryTimer.current = null;
-    }
   }, []);
 
   const commitResult = useCallback(
@@ -712,25 +958,20 @@ export default function ConcertRushGame() {
   const revealVictory = useCallback(() => {
     if (screenRef.current !== "playing") return;
     const run = runRef.current;
-    audioRef.current?.pause();
-    run.mode = "result";
-    run.success = true;
-    run.lastTrackTime = TRACK_CONFIG.durationSec;
-    setSuccess(true);
-    setScreen("victory");
-    pushUi(TRACK_CONFIG.durationSec);
-    clearVictoryTimer();
-    victoryTimer.current = window.setTimeout(() => {
-      victoryTimer.current = null;
-      commitResult(true);
-    }, 1400);
-  }, [clearVictoryTimer, commitResult, pushUi, setScreen]);
+    const track = selectedTrackRef.current;
+    run.lastTrackTime = track.durationSec;
+    pushUi(track.durationSec);
+    commitResult(true);
+  }, [commitResult, pushUi]);
 
   const beginRun = useCallback(() => {
     const audio = audioRef.current;
     if (!audio) return;
-    audio.currentTime = TRACK_CONFIG.playbackStartSec;
-    audio.volume = savedRef.current.muted ? 0 : 0.58;
+    audio.currentTime = selectedTrackRef.current.playbackStartSec;
+    audio.volume = 1;
+    const manager = audioManagerRef.current;
+    manager.setMuted(savedRef.current.muted);
+    void manager.resume();
     void audio.play().catch(() => {
       setToast("点击画面开启音乐");
     });
@@ -742,17 +983,21 @@ export default function ConcertRushGame() {
 
   const startGame = useCallback(() => {
     clearCountdownTimers();
-    clearVictoryTimer();
-    magnetTargetLanes.current.clear();
     const audio = audioRef.current;
     if (audio) {
       audio.currentTime = 0;
       audio.volume = 0;
       void audio.play().catch(() => undefined);
-      // Initialize Web Audio API pipeline
-      audioManagerRef.current.init(audio).catch(() => {
-        /* non-blocking — game still works without spectrum analysis */
-      });
+      const manager = audioManagerRef.current;
+      manager.setMuted(true);
+      void manager
+        .init(audio)
+        .then(() => {
+          void manager.loadCollectSfx();
+        })
+        .catch(() => {
+          /* non-blocking — BGM still works without Web Audio */
+        });
     }
     runRef.current = makeRuntimeState();
     runRef.current.mode = "countdown";
@@ -774,12 +1019,10 @@ export default function ConcertRushGame() {
       }, (index + 1) * 650);
       countdownTimers.current.push(timer);
     });
-  }, [beginRun, clearCountdownTimers, clearVictoryTimer, setScreen]);
+  }, [beginRun, clearCountdownTimers, setScreen]);
 
   const goHome = useCallback(() => {
     clearCountdownTimers();
-    clearVictoryTimer();
-    magnetTargetLanes.current.clear();
     const audio = audioRef.current;
     if (audio) {
       audio.pause();
@@ -790,7 +1033,7 @@ export default function ConcertRushGame() {
     runRef.current = makeRuntimeState();
     setUi(initialUi());
     setScreen("home");
-  }, [clearCountdownTimers, clearVictoryTimer, setScreen]);
+  }, [clearCountdownTimers, setScreen]);
 
   const pauseGame = useCallback(() => {
     if (screenRef.current !== "playing") return;
@@ -802,6 +1045,7 @@ export default function ConcertRushGame() {
   const resumeGame = useCallback(() => {
     if (screenRef.current !== "paused") return;
     runRef.current.mode = "playing";
+    void audioManagerRef.current.resume();
     void audioRef.current?.play().catch(() => setToast("点击画面继续播放"));
     setScreen("playing");
   }, [setScreen]);
@@ -824,7 +1068,7 @@ export default function ConcertRushGame() {
     savedRef.current = next;
     setProgress(next);
     persistProgress(next);
-    if (audioRef.current) audioRef.current.volume = next.muted ? 0 : 0.58;
+    audioManagerRef.current.setMuted(next.muted);
   }, []);
 
   const handleAction = useCallback(
@@ -834,7 +1078,7 @@ export default function ConcertRushGame() {
       if (!audio) return;
       const time = Math.max(
         0,
-        audio.currentTime - TRACK_CONFIG.playbackStartSec,
+        audio.currentTime - selectedTrackRef.current.playbackStartSec,
       );
       const run = runRef.current;
 
@@ -857,7 +1101,7 @@ export default function ConcertRushGame() {
       }
 
       const judged = judgeAction(
-        EVENTS,
+        eventsRef.current,
         action,
         time,
         run.consumedBeatIds,
@@ -897,11 +1141,16 @@ export default function ConcertRushGame() {
   );
 
   useEffect(() => {
+    let cancelled = false;
     const stored = readProgress();
     savedRef.current = stored;
-    setProgress(stored);
+    audioManagerRef.current.setMuted(stored.muted);
     runRef.current = makeRuntimeState();
-    setUi(initialUi());
+    queueMicrotask(() => {
+      if (cancelled) return;
+      setProgress(stored);
+      setUi(initialUi());
+    });
 
     const sprites: SpriteMap = {};
     Object.entries(SPRITE_FILES).forEach(([key, file]) => {
@@ -913,10 +1162,10 @@ export default function ConcertRushGame() {
     spritesRef.current = sprites;
 
     return () => {
+      cancelled = true;
       clearCountdownTimers();
-      clearVictoryTimer();
     };
-  }, [clearCountdownTimers, clearVictoryTimer]);
+  }, [clearCountdownTimers]);
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
@@ -1399,7 +1648,7 @@ export default function ConcertRushGame() {
 
     const activateItems = (time: number) => {
       const run = runRef.current;
-      for (const event of EVENTS) {
+      for (const event of eventsRef.current) {
         for (const item of event.items) {
           if (
             item.time - time <= VIEW_DISTANCE_SEC &&
@@ -1416,29 +1665,72 @@ export default function ConcertRushGame() {
       }
     };
 
-    const updateCollisions = (time: number) => {
+    const pickupTimelineTime = (item: ActiveItem) =>
+      (item.hitTime ?? item.time) +
+      VIEW_TUNING.pickupTimingOffsetMs / 1000;
+
+    const updateCollisions = (
+      time: number,
+      previousTime: number,
+    ) => {
       const run = runRef.current;
-      const magnetActive = run.magnetUntil > time;
       const jumping =
         time - run.jumpStart > 0 && time - run.jumpStart < 0.68;
       const sliding = run.slideUntil > time;
 
       for (const item of run.activeItems) {
         if (run.removedItemIds.has(item.id)) continue;
-        const delta = item.time - time;
         if (item.kind === "collectible") {
-          const magnetCollect =
-            item.type === "ticket" &&
-            magnetActive &&
-            Math.abs(delta) < 0.08;
+          const hitTime = pickupTimelineTime(item);
+          const delta = hitTime - time;
+          // Only collect on the frame where the audio clock crosses the
+          // detected musical onset. A short late allowance prevents a dropped
+          // frame from losing the pickup, without permitting early collection.
+          const crossedHitTime = didCrossPickupTime(
+            previousTime,
+            time,
+            hitTime,
+          );
           const directCollect =
-            item.lane === run.lane && Math.abs(delta) < 0.22;
-          if (magnetCollect || directCollect) {
+            item.lane === run.lane && crossedHitTime;
+          if (directCollect) {
+            const beatOffset = Math.abs(delta);
+            const beatSync =
+              beatOffset <= 0.06
+                ? "perfect"
+                : beatOffset <= 0.12
+                  ? "great"
+                  : beatOffset <= 0.18
+                    ? "good"
+                    : null;
             Object.assign(run, collectItem(run, item.type, time));
             run.removedItemIds.add(item.id);
-            magnetTargetLanes.current.delete(item.id);
+            audioManagerRef.current.playCollect(
+              item.type,
+              run.combo,
+              beatSync,
+            );
+            run.pendingPickups.push({
+              type: item.type,
+              combo: run.combo,
+              beatSync,
+            });
+            if ("vibrate" in navigator) {
+              navigator.vibrate(
+                beatSync === "perfect"
+                  ? [18, 16, 28]
+                  : beatSync === "great"
+                    ? 22
+                    : 14,
+              );
+            }
           }
-        } else if (
+          if (delta < -0.9) run.removedItemIds.add(item.id);
+          continue;
+        }
+
+        const delta = item.time - time;
+        if (
           item.lane === run.lane &&
           Math.abs(delta) < 0.1
         ) {
@@ -1470,52 +1762,156 @@ export default function ConcertRushGame() {
       const isPlaying = screenRef.current === "playing";
       const time =
         isPlaying && audio
-          ? Math.max(0, audio.currentTime - TRACK_CONFIG.playbackStartSec)
+          ? Math.max(
+              0,
+              audio.currentTime - selectedTrackRef.current.playbackStartSec,
+            )
           : run.lastTrackTime;
+      const previousTime = run.lastTrackTime;
       run.lastTrackTime = time;
       run.laneX += (run.lane - run.laneX) * 0.22;
+      // Lane widths are 0.32 / 0.36 / 0.32. With symmetric side lanes,
+      // their centers sit at ±(1 - sideRatio) × halfWidth.
+      const worldLane = (lane: number) =>
+        lane *
+        VIEW_TUNING.roadHalfWidth *
+        (1 - VIEW_TUNING.sideLaneWidthRatio);
 
-      // ─── Spectrum Analysis & Supplementary Event Generation ───────────
       if (isPlaying) {
         const audioManager = audioManagerRef.current;
         const { energy, bands } = audioManager.getSpectrum();
         run.spectrumEnergy = energy;
         run.spectrumBands = bands;
-
-        // Generate supplementary events every ~0.5s based on spectrum peaks
-        const beat = 60 / TRACK_CONFIG.bpm;
-        if (time - lastSpectrumSpawn.current > beat * 1.2) {
-          lastSpectrumSpawn.current = time;
-          const { events: suppEvents, supplementEventId } =
-            generateSupplementEvents(run, time, bands);
-          run.supplementEventId = supplementEventId;
-          // Activate new supplement events into the active items pool
-          for (const ev of suppEvents) {
-            if (!run.activatedItemIds.has(ev.id)) {
-              run.activatedItemIds.add(ev.id);
-              run.activeItems.push({
-                ...ev,
-                kind: ev.kind as ActiveItem["kind"],
-              } as ActiveItem);
-            }
-          }
-        }
       }
 
       if (isPlaying) {
         activateItems(time);
-        updateCollisions(time);
-        if (isRunComplete(time)) {
+        updateCollisions(time, previousTime);
+        if (isRunComplete(time, selectedTrackRef.current)) {
           revealVictory();
         }
         if (performance.now() - lastUiPush.current > 80) {
           lastUiPush.current = performance.now();
           pushUi(time);
         }
+
+        const pickupPoint = project(
+          width,
+          height,
+          worldLane(run.laneX),
+          0.55,
+          VIEW_TUNING.playerDepth,
+        );
+        for (const pickup of run.pendingPickups) {
+          const color = PICKUP_COLORS[pickup.type] ?? "#ffffff";
+          const perfect = pickup.beatSync === "perfect";
+          const great = pickup.beatSync === "great";
+          const particleCount =
+            12 +
+            Math.min(8, Math.floor(pickup.combo / 4)) +
+            (perfect ? 12 : great ? 6 : 0);
+
+          for (let index = 0; index < particleCount; index += 1) {
+            const angle =
+              (Math.PI * 2 * index) / particleCount +
+              Math.random() * 0.35;
+            const speed =
+              (2.4 + Math.random() * 3.8) *
+              (perfect ? 1.45 : great ? 1.2 : 1);
+            const life = 0.55 + Math.random() * 0.32;
+            run.pickupParticles.push({
+              x: pickupPoint.x,
+              y: pickupPoint.y - pickupPoint.scale * 0.38,
+              vx: Math.cos(angle) * speed,
+              vy: Math.sin(angle) * speed - 1.4,
+              life,
+              maxLife: life,
+              color: perfect && index % 2 === 0 ? "#ffffff" : color,
+              size:
+                (2.5 + Math.random() * 3.5) *
+                (perfect ? 1.35 : 1),
+            });
+          }
+
+          const itemLabel =
+            pickup.type === "ticket"
+              ? "+1 门票"
+              : "应援棒 5秒";
+          const beatLabel =
+            perfect ? "✦ PERFECT" : great ? "♪ GREAT" : "";
+          const textLife = perfect ? 1.05 : 0.82;
+          run.pickupTexts.push({
+            x: pickupPoint.x,
+            y: pickupPoint.y - pickupPoint.scale * 0.62,
+            vy: perfect ? -2.1 : -1.65,
+            life: textLife,
+            maxLife: textLife,
+            text: beatLabel ? `${beatLabel}  ${itemLabel}` : itemLabel,
+            color: perfect ? "#ffe44d" : color,
+            size: perfect ? 20 : great ? 17 : 15,
+          });
+
+          run.pickupFlash = Math.min(
+            1,
+            run.pickupFlash + (perfect ? 0.85 : great ? 0.65 : 0.5),
+          );
+          run.pickupGlow = perfect ? 1.5 : 1;
+          const shakeAmount =
+            perfect
+              ? 0.5
+              : pickup.combo >= 8
+                ? 0.3
+                : great
+                  ? 0.18
+                  : 0.1;
+          run.pickupShake = Math.min(
+            0.8,
+            run.pickupShake + shakeAmount,
+          );
+        }
+        run.pendingPickups = [];
+
+        const effectDt = 1 / 60;
+        run.pickupParticles = run.pickupParticles.filter((particle) => {
+          particle.x += particle.vx;
+          particle.y += particle.vy;
+          particle.vx *= 0.97;
+          particle.vy += 0.14;
+          particle.life -= effectDt;
+          return particle.life > 0;
+        });
+        run.pickupTexts = run.pickupTexts.filter((text) => {
+          text.y += text.vy;
+          text.vy *= 0.96;
+          text.life -= effectDt;
+          return text.life > 0;
+        });
+        run.pickupFlash = Math.max(
+          0,
+          run.pickupFlash - effectDt * 3.5,
+        );
+        run.pickupGlow = Math.max(
+          0,
+          run.pickupGlow - effectDt * 2.5,
+        );
+        run.pickupShake = Math.max(
+          0,
+          run.pickupShake - effectDt * 4,
+        );
       }
 
       const sprites = spritesRef.current;
       context.clearRect(0, 0, width, height);
+      const shakeX =
+        run.pickupShake > 0
+          ? (Math.random() - 0.5) * run.pickupShake * 14
+          : 0;
+      const shakeY =
+        run.pickupShake > 0
+          ? (Math.random() - 0.5) * run.pickupShake * 10
+          : 0;
+      context.save();
+      context.translate(shakeX, shakeY);
 
       // Fallback color behind the full-height reference background.
       const gradient = context.createLinearGradient(0, 0, 0, height);
@@ -1533,16 +1929,15 @@ export default function ConcertRushGame() {
         VIEW_TUNING.backgroundOffsetY,
       );
 
-      const beat = 60 / TRACK_CONFIG.bpm;
+      const beat = 60 / selectedTrackRef.current.bpm;
       const pulse = 0.5 + Math.cos((time % beat) / beat * Math.PI * 2) * 0.5;
       const energy = run.spectrumEnergy || 0;
       const diffLevel = run.difficulty || 1;
       const burstBoost = diffLevel >= 3 ? 1.5 : 1;
 
-      // The finish stage is hidden during the run and revealed only on victory.
+      // The finish stage is hidden during the run and revealed behind the result.
       const showFinishStage =
-        screenRef.current === "victory" ||
-        (screenRef.current === "result" && run.success);
+        screenRef.current === "result" && run.success;
       if (
         showFinishStage &&
         sprites.stage?.complete &&
@@ -1691,51 +2086,62 @@ export default function ConcertRushGame() {
         },
       );
 
+      // Lane widths are 0.32 / 0.36 / 0.32, so the two dividers sit at
+      // ±0.18 of the full road width (±0.36 × halfWidth).
+      const laneDashCycle =
+        VIEW_TUNING.laneDashLength + VIEW_TUNING.laneDashGap;
+      const laneDashFlow = (time * 8.2) % laneDashCycle;
+      const laneLineHalfWidth = VIEW_TUNING.laneDividerWidth / 2;
       [
-        -VIEW_TUNING.laneSpacing / 2,
-        VIEW_TUNING.laneSpacing / 2,
+        -VIEW_TUNING.roadHalfWidth * VIEW_TUNING.centerLaneWidthRatio,
+        VIEW_TUNING.roadHalfWidth * VIEW_TUNING.centerLaneWidthRatio,
       ].forEach((laneMark) => {
-        polygon(
-          [
-            project(width, height, laneMark - 0.025, 0.03, 2),
-            project(width, height, laneMark + 0.025, 0.03, 2),
-            project(
-              width,
-              height,
-              laneMark + 0.025,
-              0.03,
-              VIEW_TUNING.roadFarDepth,
-            ),
-            project(
-              width,
-              height,
-              laneMark - 0.025,
-              0.03,
-              VIEW_TUNING.roadFarDepth,
-            ),
-          ],
-          "#d7f7ff",
-        );
+        for (
+          let depth = 2 - laneDashFlow;
+          depth < VIEW_TUNING.roadFarDepth;
+          depth += laneDashCycle
+        ) {
+          const dashStart = Math.max(2, depth);
+          const dashEnd = Math.min(
+            VIEW_TUNING.roadFarDepth,
+            depth + VIEW_TUNING.laneDashLength,
+          );
+          if (dashEnd <= dashStart) continue;
+          polygon(
+            [
+              project(
+                width,
+                height,
+                laneMark - laneLineHalfWidth,
+                0.03,
+                dashStart,
+              ),
+              project(
+                width,
+                height,
+                laneMark + laneLineHalfWidth,
+                0.03,
+                dashStart,
+              ),
+              project(
+                width,
+                height,
+                laneMark + laneLineHalfWidth,
+                0.03,
+                dashEnd,
+              ),
+              project(
+                width,
+                height,
+                laneMark - laneLineHalfWidth,
+                0.03,
+                dashEnd,
+              ),
+            ],
+            "#e7f9ff",
+          );
+        }
       });
-
-      // Dashed lane-divider lines
-      const flow = (time * 8.2) % 3.2;
-      for (
-        let z = 2.2 - flow;
-        z < VIEW_TUNING.roadFarDepth;
-        z += 3.2
-      ) {
-        if (z < 1.3) continue;
-        polygon(
-          [
-            project(width, height, -VIEW_TUNING.roadHalfWidth + 0.2, 0.035, z),
-            project(width, height, VIEW_TUNING.roadHalfWidth - 0.2, 0.035, z),
-            project(width, height, VIEW_TUNING.roadHalfWidth - 0.2, 0.035, z + 0.18),
-            project(width, height, -VIEW_TUNING.roadHalfWidth + 0.2, 0.035, z + 0.18),
-          ],
-          "rgba(105, 133, 165, .42)",
-        );
-      }
 
       // Distance fog progressively removes the road color and lane contrast
       // before the road reaches the bright horizon core.
@@ -1760,26 +2166,30 @@ export default function ConcertRushGame() {
         drawCloudLayer(sprites.clouds, width, height, time);
       }
 
-      const worldLane = (lane: number) => lane * VIEW_TUNING.laneSpacing;
       // Sizes follow the "建议相对角色高度" reference table (角色高度 ≈ 0.97):
       //   门票（收集物）        0.15–0.3 → ~0.3
-      //   应援棒 / 磁铁（增益）  0.3–0.5  → ~0.5，比普通收集物大
+      //   应援棒（增益）        0.3–0.5  → ~0.5，比普通收集物大
       //   指路牌（横向闪避阻断）  0.8–1.2  → ~0.9
       //   横幅、扁音响为特殊绘制，尺寸在各自分支里定义。
       const spriteSize: Record<string, [number, number]> = {
         ticket: [0.34, 0.48],
         lightstick: [0.78, 0.72],
-        magnet: [0.72, 0.72],
         roadblock: [0.82, 0.90],
         speaker: [0.75, 0.55],
       };
 
       const renderItems = run.activeItems
         .filter((item) => !run.removedItemIds.has(item.id))
-        .map((item) => ({
-          ...item,
-          z: 5.4 + (item.time - time) * 8.4,
-        }))
+        .map((item) => {
+          const timelineTime =
+            item.kind === "collectible"
+              ? pickupTimelineTime(item)
+              : item.time;
+          return {
+            ...item,
+            z: 5.4 + (timelineTime - time) * 8.4,
+          };
+        })
         .filter((item) => item.z > 1.2 && item.z < MAX_RENDER_Z);
 
       renderItems
@@ -1794,7 +2204,6 @@ export default function ConcertRushGame() {
             baseSize[0] * visualScale,
             baseSize[1] * visualScale,
           ];
-          const magnetActive = run.magnetUntil > time;
           const revealRange =
             VIEW_TUNING.itemRevealStartDepth -
             VIEW_TUNING.itemFullyVisibleDepth;
@@ -1808,47 +2217,19 @@ export default function ConcertRushGame() {
           context.save();
           context.globalAlpha = emergenceAlpha;
 
-          // Tickets stay on their original lane until they pass near the player.
-          // The target lane is captured once, so changing lanes does not make
-          // every distant ticket follow the player.
-          let drawLane = item.lane;
-          let magnetLift = 0;
-          if (
-            item.kind === "collectible" &&
-            item.type === "ticket" &&
-            magnetActive &&
-            item.z < VIEW_TUNING.magnetPullStartDepth
-          ) {
-            if (!magnetTargetLanes.current.has(item.id)) {
-              magnetTargetLanes.current.set(item.id, run.lane);
-            }
-            const targetLane =
-              magnetTargetLanes.current.get(item.id) ?? run.lane;
-            const pullRange =
-              VIEW_TUNING.magnetPullStartDepth -
-              VIEW_TUNING.magnetPullEndDepth;
-            const pullProgress = Math.max(
-              0,
-              Math.min(
-                1,
-                (VIEW_TUNING.magnetPullStartDepth - item.z) / pullRange,
-              ),
-            );
-            const pullStrength =
-              pullProgress * pullProgress * (3 - 2 * pullProgress);
-            drawLane =
-              item.lane + (targetLane - item.lane) * pullStrength;
-            magnetLift = Math.sin(pullStrength * Math.PI) * 0.5;
-          }
+          const drawLane = item.lane;
 
           // First obstacle of each type gets a floating gesture arrow hint.
-          if (item.kind === "hazard" && HAZARD_HINTS.has(item.id)) {
+          if (
+            item.kind === "hazard" &&
+            hazardHintsRef.current.has(item.id)
+          ) {
             const hint = project(width, height, worldLane(drawLane), 2.0, item.z);
             drawActionArrow(
               hint.x,
               hint.y,
               hint.scale,
-              HAZARD_HINTS.get(item.id) as Action,
+              hazardHintsRef.current.get(item.id) as Action,
               time,
             );
           }
@@ -2012,7 +2393,7 @@ export default function ConcertRushGame() {
             item.z,
             size[0],
             size[1],
-            magnetLift,
+            0,
           );
           context.restore();
         });
@@ -2225,6 +2606,94 @@ export default function ConcertRushGame() {
         context.restore();
       }
 
+      if (run.pickupGlow > 0) {
+        const glowRadius =
+          scale * (0.46 + Math.min(1, run.pickupGlow) * 0.18);
+        const glow = context.createRadialGradient(
+          playerX,
+          feet.y - playerHeight * 0.5,
+          0,
+          playerX,
+          feet.y - playerHeight * 0.5,
+          glowRadius,
+        );
+        glow.addColorStop(
+          0,
+          `rgba(255, 255, 255, ${Math.min(
+            0.62,
+            run.pickupGlow * 0.48,
+          )})`,
+        );
+        glow.addColorStop(
+          0.5,
+          `rgba(255, 228, 95, ${Math.min(
+            0.34,
+            run.pickupGlow * 0.24,
+          )})`,
+        );
+        glow.addColorStop(1, "rgba(255, 194, 70, 0)");
+        context.fillStyle = glow;
+        context.beginPath();
+        context.arc(
+          playerX,
+          feet.y - playerHeight * 0.5,
+          glowRadius,
+          0,
+          Math.PI * 2,
+        );
+        context.fill();
+      }
+
+      for (const particle of run.pickupParticles) {
+        const alpha = particle.life / particle.maxLife;
+        context.globalAlpha = alpha;
+        context.fillStyle = particle.color;
+        context.beginPath();
+        context.arc(
+          particle.x,
+          particle.y,
+          particle.size * alpha,
+          0,
+          Math.PI * 2,
+        );
+        context.fill();
+        if (particle.color === "#ffffff" && alpha > 0.35) {
+          const sparkle = particle.size * alpha * 1.8;
+          context.strokeStyle = "#ffffff";
+          context.lineWidth = 1;
+          context.beginPath();
+          context.moveTo(particle.x - sparkle, particle.y);
+          context.lineTo(particle.x + sparkle, particle.y);
+          context.moveTo(particle.x, particle.y - sparkle);
+          context.lineTo(particle.x, particle.y + sparkle);
+          context.stroke();
+        }
+      }
+      context.globalAlpha = 1;
+
+      for (const text of run.pickupTexts) {
+        const alpha = text.life / text.maxLife;
+        context.globalAlpha = alpha;
+        context.font = `900 ${text.size}px system-ui, sans-serif`;
+        context.textAlign = "center";
+        context.lineWidth = 4;
+        context.strokeStyle = "rgba(13, 20, 40, 0.72)";
+        context.strokeText(text.text, text.x, text.y);
+        context.fillStyle = text.color;
+        context.fillText(text.text, text.x, text.y);
+      }
+      context.globalAlpha = 1;
+      context.textAlign = "start";
+
+      context.restore();
+
+      if (run.pickupFlash > 0) {
+        context.fillStyle = `rgba(255, 255, 255, ${
+          run.pickupFlash * 0.2
+        })`;
+        context.fillRect(0, 0, width, height);
+      }
+
       frame = requestAnimationFrame(draw);
     };
 
@@ -2246,6 +2715,7 @@ export default function ConcertRushGame() {
     const dy = event.clientY - pointerStart.current.y;
     if (Math.max(Math.abs(dx), Math.abs(dy)) < 18) {
       if (screenRef.current === "playing" && audioRef.current?.paused) {
+        void audioManagerRef.current.resume();
         void audioRef.current.play();
       }
       return;
@@ -2270,11 +2740,14 @@ export default function ConcertRushGame() {
           className={screen === "home" ? "game-canvas hidden-canvas" : "game-canvas"}
           aria-label="三车道演唱会跑酷赛道"
         />
-        <audio ref={audioRef} src={TRACK_CONFIG.audioSrc} preload="auto" />
+        <audio ref={audioRef} src={selectedTrack.audioSrc} preload="auto" />
 
         {screen === "home" && (
           <HomeScreen
             progress={progress}
+            tracks={TRACKS}
+            selectedTrack={selectedTrack}
+            onSelectTrack={selectTrack}
             onStart={startGame}
             onRules={() => setShowRules(true)}
             onSoon={showSoon}
@@ -2291,25 +2764,17 @@ export default function ConcertRushGame() {
 
         {(screen === "playing" ||
           screen === "paused" ||
-          screen === "victory" ||
           screen === "result") && (
           <>
-            <RunHud ui={ui} onPause={pauseGame} />
+            <RunHud ui={ui} track={selectedTrack} onPause={pauseGame} />
             {ui.judgement && (
               <div className={`judgement ${ui.judgement.toLowerCase()}`}>
                 {ui.judgement}
                 <small>COMBO {ui.combo}</small>
               </div>
             )}
-            {screen !== "victory" && <RunFooter ui={ui} />}
+            <RunFooter ui={ui} track={selectedTrack} />
           </>
-        )}
-
-        {screen === "victory" && (
-          <div className="victory-arrival" aria-live="polite">
-            <b>抵达演唱会现场！</b>
-            <span>演出即将开始</span>
-          </div>
         )}
 
         {screen === "paused" && (
@@ -2329,6 +2794,7 @@ export default function ConcertRushGame() {
             ui={ui}
             success={success}
             progress={progress}
+            track={selectedTrack}
             onAgain={startGame}
             onHome={goHome}
             onSoon={showSoon}
