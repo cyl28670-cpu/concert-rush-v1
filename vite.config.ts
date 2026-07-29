@@ -45,8 +45,8 @@ export default defineConfig(async () => {
 
   return {
     server: isCodexSeatbeltSandbox
-      ? { watch: { useFsEvents: false, usePolling: true } }
-      : undefined,
+      ? { watch: { useFsEvents: false, usePolling: true }, host: "0.0.0.0", port: 36893, allowedHosts: [".preview.with.woa.com", ".devnet-preview.with.woa.com"] }
+      : { host: "0.0.0.0", port: 36893, allowedHosts: [".preview.with.woa.com", ".devnet-preview.with.woa.com"] },
     plugins: [
       vinext(),
       sites(),

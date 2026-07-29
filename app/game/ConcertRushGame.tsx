@@ -15,13 +15,19 @@ import {
   computeMultiplier,
   createInitialGameState,
   distanceAtTime,
-  generateSupplementEvents,
   isRunComplete,
   judgeAction,
   makeTrackEvents,
   recordJudgement,
   resolveCollision,
 } from "./logic.js";
+import {
+  createChartPlayer,
+  DEFAULT_CHART_DEBUG,
+} from "./chartPlayer.js";
+import { generateChartFromUrl } from "./chartGenerator.js";
+import { SPECTRUM_MAPPER_CONFIG } from "../spectrumMapper.js";
+import DebugPanel from "./DebugPanel";
 
 type Screen = "home" | "countdown" | "playing" | "paused" | "result";
 type Action = "left" | "right" | "jump" | "slide";
@@ -62,9 +68,32 @@ type ActiveItem = {
   time: number;
 };
 type BaseGameState = ReturnType<typeof createInitialGameState>;
-type GameRuntime = Omit<BaseGameState, "activeItems" | "judgement"> & {
+type Particle = { x: number; y: number; vx: number; vy: number; life: number; maxLife: number; color: string; size: number };
+type FloatText = { x: number; y: number; vy: number; life: number; maxLife: number; text: string; color: string; size: number };
+type PendingPickup = { type: string; lane: number; time: number; combo: number; multiplier: number; beatDelta: number; beatSync: "perfect" | "great" | "good" | null };
+type GameRuntime = Omit<BaseGameState, "activeItems" | "judgement" | "particles" | "floatTexts" | "pendingPickups"> & {
   activeItems: ActiveItem[];
   judgement: string | null;
+  particles: Particle[];
+  floatTexts: FloatText[];
+  pendingPickups: PendingPickup[];
+};
+
+const PICKUP_COLORS: Record<string, string> = {
+  ticket: "#ffd700",
+  fragment: "#00ff88",
+  lightstick: "#ff69b4",
+  magnet: "#4488ff",
+  shield: "#61e6ff",
+  dash: "#ffe85f",
+};
+const PICKUP_SCORES: Record<string, number> = {
+  ticket: 120,
+  fragment: 160,
+  lightstick: 80,
+  magnet: 100,
+  shield: 100,
+  dash: 100,
 };
 
 const STORAGE_KEY = "concert-rush-v1-progress";
@@ -501,6 +530,19 @@ class AudioManager {
   filterActive = false;
   freqData: Uint8Array | null = null;
   audioEl: HTMLAudioElement | null = null;
+  collectBuffer: AudioBuffer | null = null;
+
+  /** Preload the coin pickup sound effect. */
+  async loadCollectSfx() {
+    if (!this.ctx || this.collectBuffer) return;
+    try {
+      const resp = await fetch("/assets/coin-pickup.mp3");
+      const arrayBuf = await resp.arrayBuffer();
+      this.collectBuffer = await this.ctx.decodeAudioData(arrayBuf);
+    } catch {
+      // If loading fails, fallback to procedural sound
+    }
+  }
 
   /**
    * Connect the <audio> element into the Web Audio graph.
@@ -569,39 +611,56 @@ class AudioManager {
     const ctx = this.ctx;
     const now = ctx.currentTime;
 
-    const osc = ctx.createOscillator();
-    const gain = ctx.createGain();
-
-    osc.connect(gain);
-    gain.connect(ctx.destination);
+    // Master gain for hit sounds — boosted for audible feedback
+    const masterGain = ctx.createGain();
+    masterGain.connect(ctx.destination);
 
     if (grade === "Perfect") {
       // Bright staccato: high sine + triangle harmonics
-      osc.type = "sine";
-      osc.frequency.setValueAtTime(880, now);
-      osc.frequency.exponentialRampToValueAtTime(1320, now + 0.04);
-      osc.frequency.exponentialRampToValueAtTime(1760, now + 0.1);
-      gain.gain.setValueAtTime(0.12, now);
-      gain.gain.exponentialRampToValueAtTime(0.001, now + 0.15);
-      osc.start(now);
-      osc.stop(now + 0.16);
+      const osc1 = ctx.createOscillator();
+      const osc2 = ctx.createOscillator();
+      osc1.type = "sine";
+      osc2.type = "triangle";
+      osc1.frequency.setValueAtTime(880, now);
+      osc1.frequency.exponentialRampToValueAtTime(1320, now + 0.04);
+      osc1.frequency.exponentialRampToValueAtTime(1760, now + 0.1);
+      osc2.frequency.setValueAtTime(1760, now);
+      osc2.frequency.exponentialRampToValueAtTime(2640, now + 0.08);
+      const g1 = ctx.createGain();
+      const g2 = ctx.createGain();
+      g1.gain.setValueAtTime(0.35, now);
+      g1.gain.exponentialRampToValueAtTime(0.001, now + 0.16);
+      g2.gain.setValueAtTime(0.15, now);
+      g2.gain.exponentialRampToValueAtTime(0.001, now + 0.12);
+      osc1.connect(g1); g1.connect(masterGain);
+      osc2.connect(g2); g2.connect(masterGain);
+      osc1.start(now); osc1.stop(now + 0.18);
+      osc2.start(now); osc2.stop(now + 0.14);
     } else if (grade === "Great") {
-      // Warm mid tone
+      // Warm mid tone — boosted
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.connect(gain);
+      gain.connect(masterGain);
       osc.type = "triangle";
       osc.frequency.setValueAtTime(660, now);
       osc.frequency.exponentialRampToValueAtTime(880, now + 0.06);
-      gain.gain.setValueAtTime(0.09, now);
-      gain.gain.exponentialRampToValueAtTime(0.001, now + 0.12);
+      gain.gain.setValueAtTime(0.28, now);
+      gain.gain.exponentialRampToValueAtTime(0.001, now + 0.14);
       osc.start(now);
-      osc.stop(now + 0.13);
+      osc.stop(now + 0.15);
     } else if (grade === "Good") {
-      // Subtle low tick
+      // Subtle low tick — boosted
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.connect(gain);
+      gain.connect(masterGain);
       osc.type = "sine";
       osc.frequency.value = 440;
-      gain.gain.setValueAtTime(0.06, now);
-      gain.gain.exponentialRampToValueAtTime(0.001, now + 0.08);
+      gain.gain.setValueAtTime(0.18, now);
+      gain.gain.exponentialRampToValueAtTime(0.001, now + 0.1);
       osc.start(now);
-      osc.stop(now + 0.09);
+      osc.stop(now + 0.11);
     }
   }
 
@@ -628,18 +687,168 @@ class AudioManager {
     if (!this.ctx || this.ctx.state === "suspended") return;
     const ctx = this.ctx;
     const now = ctx.currentTime;
-    const osc = ctx.createOscillator();
-    const gain = ctx.createGain();
-    osc.connect(gain);
-    gain.connect(ctx.destination);
-    osc.type = "sine";
+    const masterGain = ctx.createGain();
+    masterGain.connect(ctx.destination);
     const baseFreq = milestone >= 32 ? 1200 : milestone >= 16 ? 900 : 660;
-    osc.frequency.setValueAtTime(baseFreq, now);
-    osc.frequency.exponentialRampToValueAtTime(baseFreq * 1.5, now + 0.2);
-    gain.gain.setValueAtTime(0.08, now);
-    gain.gain.exponentialRampToValueAtTime(0.001, now + 0.3);
-    osc.start(now);
-    osc.stop(now + 0.32);
+    // Main oscillator
+    const osc1 = ctx.createOscillator();
+    const g1 = ctx.createGain();
+    osc1.type = "sine";
+    osc1.frequency.setValueAtTime(baseFreq, now);
+    osc1.frequency.exponentialRampToValueAtTime(baseFreq * 1.5, now + 0.2);
+    g1.gain.setValueAtTime(0.25, now);
+    g1.gain.exponentialRampToValueAtTime(0.001, now + 0.35);
+    osc1.connect(g1); g1.connect(masterGain);
+    // Harmonic for richness
+    const osc2 = ctx.createOscillator();
+    const g2 = ctx.createGain();
+    osc2.type = "triangle";
+    osc2.frequency.setValueAtTime(baseFreq * 2, now);
+    osc2.frequency.exponentialRampToValueAtTime(baseFreq * 3, now + 0.25);
+    g2.gain.setValueAtTime(0.12, now);
+    g2.gain.exponentialRampToValueAtTime(0.001, now + 0.3);
+    osc2.connect(g2); g2.connect(masterGain);
+    osc1.start(now); osc1.stop(now + 0.38);
+    osc2.start(now); osc2.stop(now + 0.35);
+  }
+
+  /** Play a pickup sound when collecting an item, scaled by combo for a
+   *  satisfying "on-beat" feel. Each collectible type has a distinct timbre
+   *  so the player can hear what they grabbed. Volume is boosted ~3x with
+   *  layered harmonics for a punchy, satisfying pickup. */
+  playCollect(type: string, combo: number, beatSync: "perfect" | "great" | "good" | null = null) {
+    if (!this.ctx || this.ctx.state === "suspended") return;
+    const ctx = this.ctx;
+    const now = ctx.currentTime;
+
+    // Combo pitch shift: every 4 combo, climb one semitone (capped)
+    const semis = Math.min(Math.floor(combo / 4), 12);
+    const mul = Math.pow(2, semis / 12);
+
+    // Master gain — boosted for punchy feedback
+    const masterGain = ctx.createGain();
+    masterGain.gain.value = 1.0;
+    // Compressor to prevent clipping at high gain while staying loud
+    const comp = ctx.createDynamicsCompressor();
+    comp.threshold.value = -6;
+    comp.knee.value = 8;
+    comp.ratio.value = 4;
+    comp.attack.value = 0.003;
+    comp.release.value = 0.08;
+    masterGain.connect(comp);
+    comp.connect(ctx.destination);
+
+    // If the coin pickup buffer is loaded, play it with pitch shift
+    if (this.collectBuffer) {
+      const src = ctx.createBufferSource();
+      src.buffer = this.collectBuffer;
+      src.playbackRate.value = mul; // combo pitch shift
+
+      // Type-specific filter to differentiate collectibles
+      const typeFilter = ctx.createBiquadFilter();
+      const gain = ctx.createGain();
+      if (type === "ticket") {
+        typeFilter.type = "highpass";
+        typeFilter.frequency.value = 600;
+        gain.gain.setValueAtTime(1.2, now);
+      } else if (type === "fragment") {
+        typeFilter.type = "lowpass";
+        typeFilter.frequency.value = 5000;
+        gain.gain.setValueAtTime(1.1, now);
+      } else if (type === "lightstick") {
+        typeFilter.type = "highpass";
+        typeFilter.frequency.value = 1000;
+        gain.gain.setValueAtTime(1.05, now);
+      } else {
+        // Buff pickup — full range, loudest
+        typeFilter.type = "allpass";
+        gain.gain.setValueAtTime(1.3, now);
+      }
+      gain.gain.exponentialRampToValueAtTime(0.001, now + 0.35);
+
+      src.connect(typeFilter);
+      typeFilter.connect(gain);
+      gain.connect(masterGain);
+      src.start(now);
+      src.stop(now + 0.4);
+
+      // ─── Beat sync harmonic overlay ────────────────────────────────
+      // When player picks up exactly on-beat, layer a bright shimmer
+      // so they can HEAR the perfect timing lock.
+      if (beatSync === "perfect") {
+        // Crystal-clear high chime + sub-bass thump
+        const shineOsc = ctx.createOscillator();
+        const shineGain = ctx.createGain();
+        shineOsc.type = "sine";
+        shineOsc.frequency.setValueAtTime(2640 * mul, now);
+        shineOsc.frequency.exponentialRampToValueAtTime(3520 * mul, now + 0.12);
+        shineGain.gain.setValueAtTime(0.5, now);
+        shineGain.gain.exponentialRampToValueAtTime(0.001, now + 0.25);
+        shineOsc.connect(shineGain);
+        shineGain.connect(masterGain);
+        shineOsc.start(now);
+        shineOsc.stop(now + 0.27);
+
+        // Sub-bass "punch" for physical impact
+        const subOsc = ctx.createOscillator();
+        const subGain = ctx.createGain();
+        subOsc.type = "sine";
+        subOsc.frequency.setValueAtTime(110, now);
+        subOsc.frequency.exponentialRampToValueAtTime(55, now + 0.1);
+        subGain.gain.setValueAtTime(0.45, now);
+        subGain.gain.exponentialRampToValueAtTime(0.001, now + 0.2);
+        subOsc.connect(subGain);
+        subGain.connect(masterGain);
+        subOsc.start(now);
+        subOsc.stop(now + 0.22);
+      } else if (beatSync === "great") {
+        // Subtle shimmer only
+        const shineOsc = ctx.createOscillator();
+        const shineGain = ctx.createGain();
+        shineOsc.type = "sine";
+        shineOsc.frequency.setValueAtTime(1980 * mul, now);
+        shineGain.gain.setValueAtTime(0.25, now);
+        shineGain.gain.exponentialRampToValueAtTime(0.001, now + 0.15);
+        shineOsc.connect(shineGain);
+        shineGain.connect(masterGain);
+        shineOsc.start(now);
+        shineOsc.stop(now + 0.17);
+      }
+      return;
+    }
+
+    // Fallback: procedural sound if buffer not loaded
+    const layer = (
+      freq: number, waveType: OscillatorType, vol: number,
+      dur: number, freqEnd?: number,
+    ) => {
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.type = waveType;
+      osc.frequency.setValueAtTime(freq, now);
+      if (freqEnd) {
+        osc.frequency.exponentialRampToValueAtTime(freqEnd, now + dur * 0.6);
+      }
+      gain.gain.setValueAtTime(vol, now);
+      gain.gain.exponentialRampToValueAtTime(0.001, now + dur);
+      osc.connect(gain);
+      gain.connect(masterGain);
+      osc.start(now);
+      osc.stop(now + dur + 0.02);
+    };
+
+    if (type === "ticket") {
+      layer(990 * mul, "sine", 0.38, 0.2, 1480 * mul);
+      layer(1980 * mul, "sine", 0.15, 0.14, 2960 * mul);
+    } else if (type === "fragment") {
+      layer(523 * mul, "triangle", 0.32, 0.24);
+      layer(784 * mul, "triangle", 0.28, 0.22);
+    } else if (type === "lightstick") {
+      layer(1320 * mul, "sine", 0.3, 0.16, 1980 * mul);
+    } else {
+      layer(330 * mul, "sawtooth", 0.28, 0.3, 660 * mul);
+      layer(165 * mul, "sine", 0.2, 0.35);
+    }
   }
 
   destroy() {
@@ -664,7 +873,11 @@ export default function ConcertRushGame() {
   const countdownTimers = useRef<number[]>([]);
   const pointerStart = useRef({ x: 0, y: 0 });
   const lastUiPush = useRef(0);
-  const lastSpectrumSpawn = useRef(0);
+  const chartPlayerRef = useRef<ReturnType<typeof createChartPlayer> | null>(null);
+  const [chartLoading, setChartLoading] = useState(false);
+  const [debugPanelOpen, setDebugPanelOpen] = useState(false);
+  const [debugInfo, setDebugInfo] = useState<typeof DEFAULT_CHART_DEBUG>(DEFAULT_CHART_DEBUG);
+  const [mapperConfig, setMapperConfig] = useState({ ...SPECTRUM_MAPPER_CONFIG });
 
   const [screen, setScreenState] = useState<Screen>("home");
   const [countdown, setCountdown] = useState(3);
@@ -760,7 +973,10 @@ export default function ConcertRushGame() {
       audio.volume = 0;
       void audio.play().catch(() => undefined);
       // Initialize Web Audio API pipeline
-      audioManagerRef.current.init(audio).catch(() => {
+      audioManagerRef.current.init(audio).then(() => {
+        // Preload coin pickup sound effect
+        audioManagerRef.current.loadCollectSfx();
+      }).catch(() => {
         /* non-blocking — game still works without spectrum analysis */
       });
     }
@@ -772,9 +988,27 @@ export default function ConcertRushGame() {
     runRef.current.recentJudgements = [];
     runRef.current.supplementEvents = [];
     runRef.current.supplementEventId = 0;
+    chartPlayerRef.current?.reset();
     setUi(initialUi(savedRef.current));
     setCountdown(3);
     setScreen("countdown");
+
+    // 异步生成离线谱面（如果尚未生成）
+    if (!chartPlayerRef.current) {
+      setChartLoading(true);
+      const audioCtx = audioManagerRef.current.ctx ?? new AudioContext();
+      generateChartFromUrl(
+        TRACK_CONFIG.audioSrc,
+        audioCtx,
+        mapperConfig,
+        TRACK_CONFIG,
+      ).then((chart) => {
+        chartPlayerRef.current = createChartPlayer(chart);
+        setChartLoading(false);
+      }).catch(() => {
+        setChartLoading(false);
+      });
+    }
 
     [2, 1, 0].forEach((number, index) => {
       const timer = window.setTimeout(() => {
@@ -1043,14 +1277,38 @@ export default function ConcertRushGame() {
         if (run.removedItemIds.has(item.id)) continue;
         const delta = item.time - time;
         if (item.kind === "collectible") {
-          // Magnet: only auto-collect when VERY close (delta < 0.3) so the
+          // Magnet: only auto-collect when close (delta < 0.25) so the
           // visual attraction animation has time to play before pickup.
-          const magnetCollect = magnetActive && delta < 0.45 && delta > -0.4;
+          const magnetCollect = magnetActive && delta < 0.25 && delta > -0.4;
           const directCollect =
             item.lane === run.lane && Math.abs(delta) < 0.22;
           if (magnetCollect || directCollect) {
+            // Beat sync detection: item.time is already snapped to beat.
+            // delta = item.time - time → how far from the exact beat point.
+            // Smaller |delta| = better beat sync = stronger feedback.
+            const absDelta = Math.abs(delta);
+            let beatSync: "perfect" | "great" | "good" | null = null;
+            if (absDelta <= 0.06) beatSync = "perfect";
+            else if (absDelta <= 0.12) beatSync = "great";
+            else if (absDelta <= 0.18) beatSync = "good";
+
             Object.assign(run, collectItem(run, item.type, time));
+            // Beat sync bonus score
+            if (beatSync === "perfect") run.score += 50 * run.multiplier;
+            else if (beatSync === "great") run.score += 25 * run.multiplier;
             run.removedItemIds.add(item.id);
+            // Pickup chime — scaled by combo so consecutive collects climb in pitch
+            audioManagerRef.current.playCollect(item.type, run.combo, beatSync);
+            // Record pickup for visual feedback in draw loop
+            run.pendingPickups.push({
+              type: item.type,
+              lane: item.lane,
+              time: time,
+              combo: run.combo,
+              multiplier: run.multiplier,
+              beatDelta: delta,
+              beatSync,
+            });
           }
         } else if (
           item.lane === run.lane &&
@@ -1089,32 +1347,30 @@ export default function ConcertRushGame() {
       run.lastTrackTime = time;
       run.laneX += (run.lane - run.laneX) * 0.22;
 
-      // ─── Spectrum Analysis & Supplementary Event Generation ───────────
-      if (isPlaying) {
+      // ─── Chart Player: 回放预生成谱面 ────────────────────────────────
+      if (isPlaying && chartPlayerRef.current) {
         const audioManager = audioManagerRef.current;
-        const { energy, bands } = audioManager.getSpectrum();
+        const { energy } = audioManager.getSpectrum();
         run.spectrumEnergy = energy;
-        run.spectrumBands = bands;
 
-        // Generate supplementary events every ~0.5s based on spectrum peaks
-        const beat = 60 / TRACK_CONFIG.bpm;
-        if (time - lastSpectrumSpawn.current > beat * 1.2) {
-          lastSpectrumSpawn.current = time;
-          const { events: suppEvents, supplementEventId } =
-            generateSupplementEvents(run, time, bands);
-          run.supplementEventId = supplementEventId;
-          // Activate new supplement events into the active items pool
-          for (const ev of suppEvents) {
-            if (!run.activatedItemIds.has(ev.id)) {
-              run.activatedItemIds.add(ev.id);
-              run.activeItems.push({
-                ...ev,
-                kind: ev.kind as ActiveItem["kind"],
-              } as ActiveItem);
-            }
+        // ChartPlayer: 按时间轴激活预生成的收集物事件
+        const chartEvents = chartPlayerRef.current.getEventsToActivate(
+          time,
+          VIEW_DISTANCE_SEC,
+        );
+        for (const ev of chartEvents) {
+          if (!run.activatedItemIds.has(ev.id)) {
+            run.activatedItemIds.add(ev.id);
+            run.activeItems.push({
+              ...ev,
+              kind: ev.kind as ActiveItem["kind"],
+            } as ActiveItem);
           }
         }
       }
+
+      const worldLane = (lane: number) => lane * 2.18;
+      const scale = project(width, height, 0, 0, 5.25).scale;
 
       if (isPlaying) {
         activateItems(time);
@@ -1126,11 +1382,136 @@ export default function ConcertRushGame() {
         if (performance.now() - lastUiPush.current > 80) {
           lastUiPush.current = performance.now();
           pushUi(time);
+          if (debugPanelOpen && chartPlayerRef.current) {
+            setDebugInfo(chartPlayerRef.current.getDebugInfo());
+          }
         }
+
+        // ─── Process pending pickups: spawn particles & floating text ──
+        const playerProj = project(width, height, worldLane(run.laneX), 0.5, 5.25);
+        for (const pick of run.pendingPickups) {
+          const color = PICKUP_COLORS[pick.type] || "#ffffff";
+          const baseScore = PICKUP_SCORES[pick.type] || 100;
+          const scoreVal = Math.round(baseScore * (pick.type === "ticket" || pick.type === "fragment" || pick.type === "lightstick" ? pick.multiplier : 1));
+          const isPerfectBeat = pick.beatSync === "perfect";
+          const isGreatBeat = pick.beatSync === "great";
+
+          // Particle burst — base count scaled by combo, boosted for perfect beat
+          let count = 12 + Math.min(6, Math.floor(pick.combo / 4));
+          if (isPerfectBeat) count += 12;
+          else if (isGreatBeat) count += 6;
+          for (let i = 0; i < count; i++) {
+            const angle = (Math.PI * 2 * i) / count + Math.random() * 0.4;
+            const speed = (2 + Math.random() * 4) * (isPerfectBeat ? 1.6 : isGreatBeat ? 1.3 : 1);
+            run.particles.push({
+              x: playerProj.x,
+              y: playerProj.y - scale * 0.4,
+              vx: Math.cos(angle) * speed,
+              vy: Math.sin(angle) * speed - 1.5,
+              life: 0.6 + Math.random() * 0.3 + (isPerfectBeat ? 0.3 : 0),
+              maxLife: 0.9 + (isPerfectBeat ? 0.3 : 0),
+              color: isPerfectBeat ? "#ffffff" : color,
+              size: (3 + Math.random() * 4) * (isPerfectBeat ? 1.5 : 1),
+            });
+          }
+
+          // Perfect beat: radial shockwave ring particles
+          if (isPerfectBeat) {
+            const ringCount = 24;
+            for (let i = 0; i < ringCount; i++) {
+              const angle = (Math.PI * 2 * i) / ringCount;
+              run.particles.push({
+                x: playerProj.x,
+                y: playerProj.y - scale * 0.4,
+                vx: Math.cos(angle) * 8,
+                vy: Math.sin(angle) * 8,
+                life: 0.45,
+                maxLife: 0.45,
+                color: "#ffe44d",
+                size: 5,
+              });
+            }
+          }
+
+          // Extra sparkle particles for high-value items
+          if (pick.type === "fragment" || pick.type === "lightstick") {
+            const sparkleCount = isPerfectBeat ? 12 : 6;
+            for (let i = 0; i < sparkleCount; i++) {
+              run.particles.push({
+                x: playerProj.x + (Math.random() - 0.5) * 20,
+                y: playerProj.y - scale * 0.5 + (Math.random() - 0.5) * 20,
+                vx: (Math.random() - 0.5) * 2,
+                vy: -2 - Math.random() * 2,
+                life: 0.8,
+                maxLife: 0.8,
+                color: "#ffffff",
+                size: 1.5 + Math.random() * 2,
+              });
+            }
+          }
+
+          // Floating score text — perfect beat gets special label & golden color
+          const label = pick.type === "ticket" ? "+1 🎫" :
+            pick.type === "fragment" ? "碎片!" :
+            pick.type === "lightstick" ? "应援!" :
+            pick.type === "magnet" ? "磁铁!" :
+            pick.type === "shield" ? "护盾!" :
+            pick.type === "dash" ? "冲刺!" : "+";
+          const beatLabel = isPerfectBeat ? "✦ PERFECT " : isGreatBeat ? "♪ GREAT " : "";
+          run.floatTexts.push({
+            x: playerProj.x,
+            y: playerProj.y - scale * 0.6,
+            vy: -1.8,
+            life: 0.9 + (isPerfectBeat ? 0.3 : 0),
+            maxLife: 0.9 + (isPerfectBeat ? 0.3 : 0),
+            text: beatLabel ? `${beatLabel}${label} +${scoreVal}` : `${label} +${scoreVal}`,
+            color: isPerfectBeat ? "#ffe44d" : isGreatBeat ? "#a8e6cf" : color,
+            size: (16 + Math.min(12, pick.combo * 0.5)) * (isPerfectBeat ? 1.4 : isGreatBeat ? 1.15 : 1),
+          });
+
+          // Trigger flash & glow & shake — scaled by beat accuracy
+          const flashAmount = isPerfectBeat ? 0.85 : isGreatBeat ? 0.65 : 0.5;
+          run.pickFlash = Math.min(1, (run.pickFlash || 0) + flashAmount);
+          run.playerGlow = isPerfectBeat ? 1.5 : 1;
+          if (pick.combo >= 8 || isPerfectBeat) {
+            const shakeAmount = isPerfectBeat ? 0.5 : 0.3;
+            run.screenShake = Math.min(0.8, (run.screenShake || 0) + shakeAmount);
+          }
+        }
+        run.pendingPickups = [];
+
+        // ─── Update particles & float texts ─────────────────────────────
+        const dt = 1 / 60;
+        run.particles = run.particles.filter((p) => {
+          p.x += p.vx;
+          p.y += p.vy;
+          p.vy += 0.15; // gravity
+          p.vx *= 0.97; // drag
+          p.life -= dt;
+          return p.life > 0;
+        });
+        run.floatTexts = run.floatTexts.filter((ft) => {
+          ft.y += ft.vy;
+          ft.vy *= 0.96;
+          ft.life -= dt;
+          return ft.life > 0;
+        });
+
+        // Decay flash, glow, shake
+        run.pickFlash = Math.max(0, (run.pickFlash || 0) - dt * 3.5);
+        run.playerGlow = Math.max(0, (run.playerGlow || 0) - dt * 2.5);
+        run.screenShake = Math.max(0, (run.screenShake || 0) - dt * 4);
       }
 
       const sprites = spritesRef.current;
       context.clearRect(0, 0, width, height);
+
+      // Screen shake transform — applied to entire scene
+      const shakeMag = run.screenShake || 0;
+      const shakeX = shakeMag > 0 ? (Math.random() - 0.5) * shakeMag * 14 : 0;
+      const shakeY = shakeMag > 0 ? (Math.random() - 0.5) * shakeMag * 10 : 0;
+      context.save();
+      context.translate(shakeX, shakeY);
 
       // Base sky gradient — sampled from run_bg_city_a.png's own sky colors
       const gradient = context.createLinearGradient(0, 0, 0, height);
@@ -1182,7 +1563,8 @@ export default function ConcertRushGame() {
         const barCount = 24;
         const barW = Math.max(1, width / barCount - 2);
         const barMaxH = height * 0.04;
-        const { bass, lowMid, highMid, high } = run.spectrumBands;
+        const { bands: liveBands } = audioManagerRef.current.getSpectrum();
+        const { bass, lowMid, highMid, high } = liveBands;
         context.globalAlpha = 0.35;
         for (let i = 0; i < barCount; i++) {
           let val: number;
@@ -1246,7 +1628,6 @@ export default function ConcertRushGame() {
         );
       }
 
-      const worldLane = (lane: number) => lane * 2.18;
       const spriteSize: Record<string, [number, number]> = {
         ticket: [0.56, 0.82],
         lightstick: [0.64, 0.58],
@@ -1273,20 +1654,32 @@ export default function ConcertRushGame() {
           const size = spriteSize[item.type] || [0.8, 0.8];
           const magnetActive = run.magnetUntil > time;
 
-          // Magnet attraction: collectibles snap toward player fast.
-          // Square-root curve gives strong pull even at distance.
+          // Magnet attraction: collectibles snap toward player when close.
+          // Linear curve: zero pull at range edge, full pull at player.
           let drawLane = item.lane;
           let magnetLift = 0;
-          if (item.kind === "collectible" && magnetActive && item.z < 25) {
-            const t = Math.max(0, 1 - item.z / 25);
-            const pullStrength = Math.sqrt(t) * 0.6 + 0.4; // 0.4 → 1.0, fast snap
+          if (item.kind === "collectible" && magnetActive && item.z < 10) {
+            const t = Math.max(0, 1 - item.z / 10);
+            const pullStrength = t * t; // 0 → 1, quadratic ease-in
             drawLane = item.lane + (run.laneX - item.lane) * pullStrength;
-            magnetLift = Math.sin((25 - item.z) * 0.6) * 0.45 * pullStrength;
+            magnetLift = Math.sin((10 - item.z) * 0.6) * 0.45 * pullStrength;
           }
 
           // "over" barriers float in the air — player slides UNDER them
           const hazardLift =
             item.kind === "hazard" && item.type === "over" ? 1.1 : 0;
+
+          // Beat pulse: collectibles scale with beat phase for visual rhythm
+          let beatScale = 1.0;
+          if (item.kind === "collectible") {
+            // Pulse stronger when close to player (z near 5.25 = player position)
+            const proximity = Math.max(0, 1 - Math.abs(item.z - 5.25) / 8);
+            // Beat phase: 0 at beat center, 1 between beats
+            const beatPhase = (time % beat) / beat;
+            // Sharp pulse at beat moment, smooth decay
+            const pulseAmt = Math.pow(1 - beatPhase, 2) * 0.18 * proximity;
+            beatScale = 1 + pulseAmt;
+          }
 
           drawSprite(
             sprites[item.type],
@@ -1294,10 +1687,31 @@ export default function ConcertRushGame() {
             height,
             worldLane(drawLane),
             item.z,
-            size[0],
-            size[1],
+            size[0] * beatScale,
+            size[1] * beatScale,
             magnetLift + hazardLift,
           );
+
+          // Beat ring: draw a pulsing ring around collectibles near player
+          if (item.kind === "collectible" && item.z < 8 && item.z > 2) {
+            const proximity = Math.max(0, 1 - Math.abs(item.z - 5.25) / 4);
+            const beatPhase = (time % beat) / beat;
+            const ringAlpha = Math.pow(1 - beatPhase, 3) * 0.5 * proximity;
+            if (ringAlpha > 0.02) {
+              const ringProj = project(
+                width, height,
+                worldLane(drawLane),
+                magnetLift + hazardLift + 0.3,
+                item.z,
+              );
+              const ringRadius = (spriteSize[item.type]?.[0] || 0.8) * ringProj.scale * 0.6 * beatScale;
+              context.strokeStyle = `rgba(255, 220, 100, ${ringAlpha})`;
+              context.lineWidth = 2;
+              context.beginPath();
+              context.arc(ringProj.x, ringProj.y - ringRadius, ringRadius, 0, Math.PI * 2);
+              context.stroke();
+            }
+          }
         });
 
       const jumpAge = time - run.jumpStart;
@@ -1319,7 +1733,6 @@ export default function ConcertRushGame() {
         jump + runBob,
         5.25,
       );
-      const scale = ground.scale;
       const beatSquash =
         isPlaying && !sliding && jump === 0
           ? Math.sin(stepPhase) * 0.025
@@ -1450,6 +1863,69 @@ export default function ConcertRushGame() {
         }
       }
 
+      // ─── Player glow on pickup ──────────────────────────────────────
+      if (run.playerGlow > 0) {
+        const glowR = scale * (0.5 + (1 - run.playerGlow) * 0.3);
+        const glowGrad = context.createRadialGradient(
+          playerX, feet.y - scale * 0.4, 0,
+          playerX, feet.y - scale * 0.4, glowR,
+        );
+        glowGrad.addColorStop(0, `rgba(255, 255, 255, ${run.playerGlow * 0.5})`);
+        glowGrad.addColorStop(0.5, `rgba(255, 230, 120, ${run.playerGlow * 0.25})`);
+        glowGrad.addColorStop(1, "rgba(255, 200, 80, 0)");
+        context.fillStyle = glowGrad;
+        context.beginPath();
+        context.arc(playerX, feet.y - scale * 0.4, glowR, 0, Math.PI * 2);
+        context.fill();
+      }
+
+      // ─── Draw particles ─────────────────────────────────────────────
+      for (const p of run.particles) {
+        const alpha = p.life / p.maxLife;
+        context.globalAlpha = alpha;
+        context.fillStyle = p.color;
+        context.beginPath();
+        context.arc(p.x, p.y, p.size * alpha, 0, Math.PI * 2);
+        context.fill();
+        // Star-shaped sparkle for white particles
+        if (p.color === "#ffffff" && alpha > 0.4) {
+          context.strokeStyle = p.color;
+          context.lineWidth = 1;
+          const sparkLen = p.size * 2 * alpha;
+          context.beginPath();
+          context.moveTo(p.x - sparkLen, p.y);
+          context.lineTo(p.x + sparkLen, p.y);
+          context.moveTo(p.x, p.y - sparkLen);
+          context.lineTo(p.x, p.y + sparkLen);
+          context.stroke();
+        }
+      }
+      context.globalAlpha = 1;
+
+      // ─── Draw floating score text ───────────────────────────────────
+      for (const ft of run.floatTexts) {
+        const alpha = ft.life / ft.maxLife;
+        context.globalAlpha = alpha;
+        context.font = `bold ${ft.size}px system-ui, sans-serif`;
+        context.textAlign = "center";
+        context.lineWidth = 4;
+        context.strokeStyle = "rgba(0,0,0,0.6)";
+        context.strokeText(ft.text, ft.x, ft.y);
+        context.fillStyle = ft.color;
+        context.fillText(ft.text, ft.x, ft.y);
+      }
+      context.globalAlpha = 1;
+      context.textAlign = "start";
+
+      // Restore screen shake transform
+      context.restore();
+
+      // ─── Pickup flash overlay (full screen, after restore) ──────────
+      if (run.pickFlash > 0) {
+        context.fillStyle = `rgba(255, 255, 255, ${run.pickFlash * 0.18})`;
+        context.fillRect(0, 0, width, height);
+      }
+
       frame = requestAnimationFrame(draw);
     };
 
@@ -1553,6 +2029,34 @@ export default function ConcertRushGame() {
         {showRules && <RulesModal onClose={closeRules} />}
         {toast && <div className="toast">{toast}</div>}
       </section>
+      <DebugPanel
+        open={debugPanelOpen}
+        onToggle={() => setDebugPanelOpen((v) => !v)}
+        config={mapperConfig}
+        onConfigChange={(partial) => {
+          const next = { ...mapperConfig, ...partial };
+          setMapperConfig(next);
+          // 参数变更后重新生成谱面
+          const audioCtx = audioManagerRef.current.ctx;
+          if (audioCtx) {
+            setChartLoading(true);
+            generateChartFromUrl(
+              TRACK_CONFIG.audioSrc,
+              audioCtx,
+              next,
+              TRACK_CONFIG,
+            ).then((chart) => {
+              chartPlayerRef.current = createChartPlayer(chart);
+              setChartLoading(false);
+            }).catch(() => {
+              setChartLoading(false);
+            });
+          }
+        }}
+        debugInfo={debugInfo}
+        currentTime={ui.timeLeft > 0 ? TRACK_CONFIG.durationSec - ui.timeLeft : 0}
+        loading={chartLoading}
+      />
     </main>
   );
 }

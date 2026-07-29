@@ -275,6 +275,13 @@ export function createInitialGameState(cumulativeFragments = 0) {
     // Supplementary real-time events for spectrum-driven gameplay
     supplementEvents: [],
     supplementEventId: 0,
+    // Visual feedback state for pickup feedback
+    particles: [],
+    floatTexts: [],
+    pendingPickups: [],
+    pickFlash: 0,
+    screenShake: 0,
+    playerGlow: 0,
   };
 }
 

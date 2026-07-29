@@ -6,9 +6,9 @@
     "node": ">=22.13.0"
   },
   "scripts": {
-    "dev": "WRANGLER_LOG_PATH=.wrangler/wrangler.log vinext dev",
+    "dev": "WRANGLER_LOG_PATH=.wrangler/wrangler.log vinext dev -p 36893 -H 0.0.0.0",
     "build": "WRANGLER_LOG_PATH=.wrangler/wrangler.log vinext build",
-    "start": "WRANGLER_LOG_PATH=.wrangler/wrangler.log vinext start",
+    "start": "WRANGLER_LOG_PATH=.wrangler/wrangler.log vinext start -p 8000 -H 0.0.0.0",
     "test": "node --test tests/game-logic.test.mjs",
     "lint": "eslint . --ignore-pattern dist --ignore-pattern .next",
     "db:generate": "drizzle-kit generate"

@@ -997,3 +997,251 @@ button {
     transition-duration: 0.01ms !important;
   }
 }
+
+/* ═══ 频谱映射调试面板 ═══ */
+
+.dbg-toggle-closed {
+  position: fixed;
+  top: 12px;
+  right: 12px;
+  z-index: 9999;
+  width: 40px;
+  height: 40px;
+  border-radius: 50%;
+  border: 2px solid rgba(255, 255, 255, 0.3);
+  background: rgba(20, 30, 60, 0.85);
+  color: #48dbfb;
+  font-size: 20px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  backdrop-filter: blur(8px);
+  transition: transform 0.2s, background 0.2s;
+}
+.dbg-toggle-closed:hover {
+  transform: scale(1.1);
+  background: rgba(30, 50, 100, 0.9);
+}
+
+.dbg-panel {
+  position: fixed;
+  top: 0;
+  right: 0;
+  z-index: 9999;
+  width: 340px;
+  height: 100vh;
+  overflow-y: auto;
+  background: rgba(12, 20, 42, 0.95);
+  border-left: 1px solid rgba(72, 219, 251, 0.2);
+  color: #e0e6ed;
+  font-size: 12px;
+  font-family: "SF Mono", "Menlo", monospace;
+  backdrop-filter: blur(12px);
+  padding: 0;
+}
+
+.dbg-header {
+  position: sticky;
+  top: 0;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 10px 14px;
+  background: rgba(20, 30, 60, 0.95);
+  border-bottom: 1px solid rgba(72, 219, 251, 0.15);
+  font-weight: 700;
+  color: #48dbfb;
+  font-size: 13px;
+}
+
+.dbg-close {
+  background: none;
+  border: none;
+  color: #e74c3c;
+  font-size: 16px;
+  cursor: pointer;
+  padding: 2px 6px;
+}
+
+.dbg-section {
+  padding: 10px 14px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+}
+.dbg-section h4 {
+  margin: 0 0 8px 0;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: #8b9bb4;
+}
+
+.dbg-slider-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+.dbg-slider-label {
+  flex: 0 0 90px;
+  font-size: 11px;
+  color: #b0bccc;
+}
+.dbg-slider-row input[type="range"] {
+  flex: 1;
+  height: 4px;
+  -webkit-appearance: none;
+  appearance: none;
+  background: rgba(72, 219, 251, 0.15);
+  border-radius: 2px;
+  outline: none;
+}
+.dbg-slider-row input[type="range"]::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: #48dbfb;
+  cursor: pointer;
+}
+.dbg-slider-row input[type="range"]::-moz-range-thumb {
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: #48dbfb;
+  cursor: pointer;
+  border: none;
+}
+.dbg-slider-value {
+  flex: 0 0 52px;
+  text-align: right;
+  font-size: 10px;
+  color: #48dbfb;
+  font-variant-numeric: tabular-nums;
+}
+
+.dbg-band-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 4px;
+}
+.dbg-band-label {
+  flex: 0 0 40px;
+  font-size: 11px;
+  color: #b0bccc;
+}
+.dbg-band-bar-bg {
+  flex: 1;
+  height: 8px;
+  background: rgba(255, 255, 255, 0.06);
+  border-radius: 4px;
+  overflow: hidden;
+}
+.dbg-band-bar-fill {
+  height: 100%;
+  border-radius: 4px;
+  transition: width 0.06s linear;
+}
+.dbg-band-value {
+  flex: 0 0 40px;
+  text-align: right;
+  font-size: 10px;
+  color: #6b7d94;
+  font-variant-numeric: tabular-nums;
+}
+
+.dbg-onset-list,
+.dbg-event-list {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+}
+.dbg-onset-list li,
+.dbg-event-list li {
+  display: flex;
+  gap: 6px;
+  padding: 3px 0;
+  font-size: 11px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.03);
+}
+.dbg-onset-time {
+  color: #feca57;
+  flex: 0 0 50px;
+}
+.dbg-onset-bands {
+  color: #ff6b6b;
+  flex: 1;
+}
+.dbg-onset-str {
+  color: #6b7d94;
+  font-size: 10px;
+}
+.dbg-event-type {
+  color: #48dbfb;
+  font-weight: 600;
+  flex: 0 0 60px;
+}
+.dbg-event-lane {
+  color: #feca57;
+  flex: 0 0 50px;
+}
+.dbg-event-time {
+  color: #b0bccc;
+  flex: 0 0 50px;
+}
+.dbg-event-src {
+  color: #6b7d94;
+  font-size: 10px;
+  margin-left: auto;
+}
+
+.dbg-empty {
+  color: #6b7d94;
+  font-style: italic;
+  font-size: 11px;
+}
+
+.dbg-route-info {
+  display: flex;
+  gap: 16px;
+  font-size: 12px;
+}
+.dbg-route-info b {
+  color: #48dbfb;
+}
+
+.dbg-strategy-buttons {
+  display: flex;
+  gap: 6px;
+  margin-bottom: 8px;
+}
+.dbg-strategy-buttons button {
+  flex: 1;
+  padding: 5px 0;
+  border: 1px solid rgba(72, 219, 251, 0.2);
+  background: rgba(20, 30, 60, 0.6);
+  color: #b0bccc;
+  border-radius: 4px;
+  font-size: 11px;
+  cursor: pointer;
+  font-family: inherit;
+}
+.dbg-strategy-buttons button.active {
+  background: rgba(72, 219, 251, 0.2);
+  color: #48dbfb;
+  border-color: #48dbfb;
+}
+
+/* 滚动条 */
+.dbg-panel::-webkit-scrollbar {
+  width: 6px;
+}
+.dbg-panel::-webkit-scrollbar-track {
+  background: rgba(0, 0, 0, 0.2);
+}
+.dbg-panel::-webkit-scrollbar-thumb {
+  background: rgba(72, 219, 251, 0.3);
+  border-radius: 3px;
+}
