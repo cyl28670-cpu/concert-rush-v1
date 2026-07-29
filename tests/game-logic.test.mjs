@@ -2,11 +2,13 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   TRACK_CONFIG,
+  MIN_HAZARD_GAP_SEC,
   DIFFICULTY_TABLE,
   SPECTRUM_BANDS,
   clampLane,
   collectItem,
   computeDifficulty,
+  computeEntryTier,
   computeMultiplier,
   createInitialGameState,
   distanceAtTime,
@@ -62,67 +64,101 @@ test("generated rows keep at least one safe lane", () => {
   }
 });
 
-test("burst phrases create fast alternating lane changes", () => {
+test("track uses exactly the three requested obstacle rules", () => {
   const events = makeTrackEvents();
-  const phrases = Map.groupBy(
-    events.filter((event) => event.burst),
-    (event) => event.phraseId,
-  );
-  assert.ok(phrases.size >= 3);
+  const hazardTypes = new Set();
+  const rewardTypes = new Set();
 
-  for (const phrase of phrases.values()) {
-    assert.ok(phrase.length >= 4);
-    for (let index = 1; index < phrase.length; index += 1) {
-      const gap = phrase[index].time - phrase[index - 1].time;
-      // Burst phrases use 1-beat spacing (≈0.47s @ 128 BPM) — human-reactable
-      assert.ok(gap <= (60 / TRACK_CONFIG.bpm) * 1.01);
-      assert.notEqual(phrase[index].targetLane, phrase[index - 1].targetLane);
+  for (const event of events) {
+    const hazard = event.items.find((item) => item.kind === "hazard");
+    const reward = event.items.find((item) => item.kind === "collectible");
+    hazardTypes.add(hazard.type);
+    rewardTypes.add(reward.type);
+
+    if (event.action === "jump") assert.equal(hazard.type, "speaker");
+    if (event.action === "slide") assert.equal(hazard.type, "banner");
+    if (event.action === "left" || event.action === "right") {
+      assert.equal(hazard.type, "roadblock");
     }
+  }
+
+  assert.deepEqual([...hazardTypes].sort(), ["banner", "roadblock", "speaker"]);
+  assert.ok([...rewardTypes].every((type) =>
+    ["ticket", "magnet", "lightstick"].includes(type),
+  ));
+});
+
+test("obstacle rows are pre-spaced so a third row stays behind the cloud", () => {
+  const events = makeTrackEvents();
+  for (let index = 1; index < events.length; index += 1) {
+    const gap = events[index].time - events[index - 1].time;
+    assert.ok(gap >= MIN_HAZARD_GAP_SEC - 0.000001);
+  }
+  for (let index = 2; index < events.length; index += 1) {
+    const threeRowSpan = events[index].time - events[index - 2].time;
+    assert.ok(threeRowSpan >= MIN_HAZARD_GAP_SEC * 2 - 0.000001);
   }
 });
 
-test("collectibles update score, fragments, multiplier and powerups", () => {
-  let state = createInitialGameState(119);
+test("tickets are the score and timed powerups last five seconds", () => {
+  let state = createInitialGameState();
   state = collectItem(state, "ticket", 1);
   assert.equal(state.tickets, 1);
   assert.equal(state.score, 120);
 
-  state = collectItem(state, "fragment", 2);
-  assert.equal(state.fragmentsRun, 1);
-  assert.equal(state.cumulativeFragments, 120);
-
   state = collectItem(state, "lightstick", 3);
-  state = collectItem(state, "lightstick", 4);
-  assert.equal(state.multiplier, 2);
+  assert.equal(state.lightstickUntil, 8);
+
+  state = collectItem(state, "ticket", 4);
+  assert.equal(state.tickets, 2);
+  assert.equal(state.score, 240);
+
+  state = collectItem(state, "lightstick", 6);
+  assert.equal(state.lightstickUntil, 13);
 
   state = collectItem(state, "magnet", 5);
-  state = collectItem(state, "dash", 5);
-  state = collectItem(state, "shield", 5);
-  assert.equal(state.magnetUntil, 11);
-  assert.equal(state.dashUntil, 9.5);
-  assert.equal(state.shield, 1);
+  assert.equal(state.magnetUntil, 10);
+  state = collectItem(state, "magnet", 7);
+  assert.equal(state.magnetUntil, 15);
 });
 
-test("dash breaks obstacles, shield absorbs one hit, next hit fails", () => {
-  const base = createInitialGameState();
-  const dashing = { ...base, dashUntil: 10 };
-  assert.equal(resolveCollision(dashing, 5).failed, false);
-
-  const shielded = { ...base, shield: 1 };
-  const shieldHit = resolveCollision(shielded, 5);
-  assert.equal(shieldHit.failed, false);
-  assert.equal(shieldHit.state.shield, 0);
-
-  assert.equal(resolveCollision(shieldHit.state, 5.5).failed, true);
+test("ticket score caps at the 100-ticket goal", () => {
+  const state = {
+    ...createInitialGameState(),
+    tickets: 99,
+    lightstickUntil: 10,
+  };
+  assert.equal(collectItem(state, "ticket", 5).tickets, 100);
 });
 
-test("distance and finish state are derived from the 45-second audio clock", () => {
+test("lightstick makes the player invincible until its timer expires", () => {
+  const protectedState = {
+    ...createInitialGameState(),
+    lightstickUntil: 10,
+  };
+  assert.equal(resolveCollision(protectedState, 5).failed, false);
+  assert.equal(resolveCollision(protectedState, 10).failed, true);
+  assert.equal(resolveCollision(createInitialGameState(), 0).failed, true);
+});
+
+test("distance counts down from 999 metres over the 45-second audio clock", () => {
   assert.equal(distanceAtTime(0), 0);
-  assert.equal(distanceAtTime(22.5), 175);
-  assert.equal(distanceAtTime(45), 350);
-  assert.equal(distanceAtTime(90), 350);
+  assert.equal(distanceAtTime(22.5), 499.5);
+  assert.equal(distanceAtTime(45), 999);
+  assert.equal(distanceAtTime(90), 999);
   assert.equal(isRunComplete(44.99), false);
   assert.equal(isRunComplete(TRACK_CONFIG.durationSec), true);
+});
+
+test("entry tier at the finish follows the 10 / 30 / 50 ticket thresholds", () => {
+  assert.equal(computeEntryTier(0).id, "denied");
+  assert.equal(computeEntryTier(9).id, "denied");
+  assert.equal(computeEntryTier(10).id, "hilltop");
+  assert.equal(computeEntryTier(29).id, "hilltop");
+  assert.equal(computeEntryTier(30).id, "normal");
+  assert.equal(computeEntryTier(49).id, "normal");
+  assert.equal(computeEntryTier(50).id, "vip");
+  assert.equal(computeEntryTier(120).id, "vip");
 });
 
 // ─── New tests: Dynamic Difficulty & Spectrum System ────────────────────────
@@ -227,13 +263,13 @@ test("generateSupplementEvents produces collectibles based on spectrum peaks", (
   assert.ok(bassResult.events.some((e) => e.type === "ticket"));
 });
 
-test("generateSupplementEvents spawns items 2.5+ seconds ahead", () => {
+test("generateSupplementEvents spawns items behind the cloud", () => {
   const state = createInitialGameState();
   const energy = { bass: 0.7, lowMid: 0.6, highMid: 0.3, high: 0.3 };
   const result = generateSupplementEvents(state, 5, energy);
   for (const ev of result.events) {
-    assert.ok(ev.time >= 5 + 2.5);          // minimum 2.5s lead
-    assert.ok(ev.time <= 5 + 5.5);          // max ~5.5s lead
+    assert.ok(ev.time >= 5 + 4.2);
+    assert.ok(ev.time <= 5 + 7.2);
   }
 });
 

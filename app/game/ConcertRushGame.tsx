@@ -8,10 +8,10 @@ import {
 } from "react";
 import {
   TRACK_CONFIG,
-  DIFFICULTY_TABLE,
   SPECTRUM_BANDS,
   clampLane,
   collectItem,
+  computeEntryTier,
   computeMultiplier,
   createInitialGameState,
   distanceAtTime,
@@ -22,35 +22,35 @@ import {
   recordJudgement,
   resolveCollision,
 } from "./logic.js";
+import {
+  ASSET_BASE_URL,
+  RUN_IMAGE_FILES,
+  assetUrl,
+} from "./game-assets";
+import { VIEW_TUNING } from "./view-tuning";
 
-type Screen = "home" | "countdown" | "playing" | "paused" | "result";
+type Screen =
+  | "home"
+  | "countdown"
+  | "playing"
+  | "paused"
+  | "victory"
+  | "result";
 type Action = "left" | "right" | "jump" | "slide";
 
 type SavedProgress = {
-  cumulativeFragments: number;
-  bestScore: number;
   bestTickets: number;
-  bestMultiplier: number;
   rulesRead: boolean;
   muted: boolean;
 };
 
 type UiSnapshot = {
-  timeLeft: number;
   distance: number;
-  score: number;
   tickets: number;
-  fragmentsRun: number;
-  cumulativeFragments: number;
   combo: number;
-  multiplier: number;
-  maxMultiplier: number;
   magnet: number;
-  shield: number;
-  dash: number;
+  lightstick: number;
   judgement: string | null;
-  difficulty: number;
-  spectrumEnergy: number;
 };
 
 type SpriteMap = Record<string, HTMLImageElement>;
@@ -72,69 +72,64 @@ const STORAGE_KEY = "concert-rush-v1-progress";
 // ── Tunable View Parameters ────────────────────────────────────────────────
 /** How many seconds ahead obstacles activate and become visible.
  *  Higher = obstacles appear further away, more reaction time.
- *  At 6.5s, obstacles fade in near the horizon (small, distant).
+ *  At 7.2s, two obstacle rows can already wait behind the horizon clouds.
  *  At 4.1s (old default), they pop in much closer. */
-const VIEW_DISTANCE_SEC = 6.5;
+const VIEW_DISTANCE_SEC = 7.2;
 /** Max Z-depth for rendering (derived from VIEW_DISTANCE_SEC). */
 const MAX_RENDER_Z = 5.4 + VIEW_DISTANCE_SEC * 8.4;
 const EVENTS = makeTrackEvents();
-const ASSET = "/assets/";
 
-// ── Background/road seam calibration ──────────────────────────────────────
-// run_bg_city_a.png (694×727px) contains a full perspective street scene
-// with its own road. To avoid a "double road" effect, we only draw the
-// SAFE region of that image (buildings + stage, zero road/sidewalk pixels,
-// verified by pixel sampling) and let the Canvas-drawn 3D road — using the
-// exact same asphalt color (#3c507a) — continue seamlessly from there.
-const CITY_SAFE_CROP_RATIO = 360 / 727;
+// First appearance of each hazard type → show a gesture arrow hint above it.
+// Maps the hazard item id to the action the player must perform.
+const HAZARD_HINTS: Map<string, Action> = (() => {
+  const seen = new Set<string>();
+  const hints = new Map<string, Action>();
+  for (const event of EVENTS) {
+    const hazard = event.items.find((item) => item.kind === "hazard");
+    if (!hazard || seen.has(hazard.type)) continue;
+    seen.add(hazard.type);
+    hints.set(hazard.id, event.action as Action);
+  }
+  return hints;
+})();
+const ASSET = ASSET_BASE_URL;
+const TICKET_SPRITE = RUN_IMAGE_FILES.ticket;
+const LIGHTSTICK_SPRITE = RUN_IMAGE_FILES.lightstick;
 
 // ── Camera & Perspective Tunables ─────────────────────────────────────────
-/** Vertical screen position (0-1) of the road's vanishing point.
- *  0.20 = high horizon (road starts near top, more visible road)
- *  0.50 = mid horizon (balanced)
- *  0.65 = low horizon (more sky, less road) */
-const ROAD_VANISHING_RATIO = 0.20;
+/** Perspective focal factor derived from a real vertical field of view. */
+const FOCAL_FACTOR =
+  1 /
+  (2 * Math.tan((VIEW_TUNING.verticalFovDeg * Math.PI) / 360));
 
-/** Camera height in world units. Higher = camera looks down more.
- *  2.25 = low angle (racing game feel)
- *  3.0  = elevated (better overview of obstacles)
- *  4.0  = near top-down */
-const CAMERA_HEIGHT = 3.0;
-
-/** Focal length factor (0-1 of screen height). Higher = more zoom. */
-const FOCAL_FACTOR = 0.82;
-
-// Derived: base Y offset so the road's far edge (z=60) lands at
-// ROAD_VANISHING_RATIO regardless of camera height.
+// Keep the perspective calibrated against the original 60-unit reference
+// while allowing the visible road to end earlier inside the horizon fog.
 const ROAD_VANISHING_C =
-  ROAD_VANISHING_RATIO - CAMERA_HEIGHT * (FOCAL_FACTOR / 60);
+  VIEW_TUNING.roadVanishingRatio -
+  VIEW_TUNING.cameraHeight * (FOCAL_FACTOR / 60);
 const DEFAULT_PROGRESS: SavedProgress = {
-  cumulativeFragments: 0,
-  bestScore: 0,
   bestTickets: 0,
-  bestMultiplier: 1,
   rulesRead: false,
   muted: false,
 };
 
-function makeRuntimeState(cumulativeFragments = 0) {
-  return createInitialGameState(cumulativeFragments) as GameRuntime;
+function makeRuntimeState() {
+  return createInitialGameState() as GameRuntime;
 }
 
 const SPRITE_FILES = {
-  city: "run_bg_city_a.png",
-  player: "player_fan.png",
-  ticket: "collectible_ticket.png",
-  lightstick: "collectible_lightstick.png",
-  fragment: "collectible_lyric.png",
-  magnet: "buff_magnet.png",
-  shield: "buff_shield.png",
-  dash: "buff_dash.png",
-  low: "obstacle_construction_sign.png",
-  over: "obstacle_barrier.png",
-  block: "obstacle_speaker.png",
-  speaker: "obstacle_speaker.png",
-  crowd: "obstacle_crowd.png",
+  backdrop: RUN_IMAGE_FILES.background,
+  clouds: RUN_IMAGE_FILES.cloudLayer,
+  roadsideCity: RUN_IMAGE_FILES.roadsideCity,
+  stage: RUN_IMAGE_FILES.finishStage,
+  player: RUN_IMAGE_FILES.player,
+  playerJump: RUN_IMAGE_FILES.playerJump,
+  playerSlide: RUN_IMAGE_FILES.playerSlide,
+  ticket: RUN_IMAGE_FILES.ticket,
+  lightstick: RUN_IMAGE_FILES.lightstick,
+  magnet: RUN_IMAGE_FILES.magnet,
+  roadblock: RUN_IMAGE_FILES.roadblock,
+  speaker: RUN_IMAGE_FILES.speaker,
 };
 
 function readProgress(): SavedProgress {
@@ -155,23 +150,14 @@ function persistProgress(progress: SavedProgress) {
   }
 }
 
-function initialUi(progress = DEFAULT_PROGRESS): UiSnapshot {
+function initialUi(): UiSnapshot {
   return {
-    timeLeft: TRACK_CONFIG.durationSec,
     distance: 0,
-    score: 0,
     tickets: 0,
-    fragmentsRun: 0,
-    cumulativeFragments: progress.cumulativeFragments,
     combo: 0,
-    multiplier: 1,
-    maxMultiplier: 1,
     magnet: 0,
-    shield: 0,
-    dash: 0,
+    lightstick: 0,
     judgement: null,
-    difficulty: 1,
-    spectrumEnergy: 0,
   };
 }
 
@@ -188,10 +174,7 @@ function HomeScreen({
   onSoon: (label: string) => void;
   onToggleMute: () => void;
 }) {
-  const pct = Math.min(
-    100,
-    (progress.cumulativeFragments / TRACK_CONFIG.fragmentGoal) * 100,
-  );
+  const pct = Math.min(100, (progress.bestTickets / TRACK_CONFIG.ticketGoal) * 100);
 
   return (
     <section className="home-screen" data-testid="home-screen">
@@ -217,12 +200,12 @@ function HomeScreen({
         <div className="home-copy">
           <p>♫　巡演目标：<strong>赶到演唱会现场</strong></p>
           <p>
-            ♫　歌曲进度：
+            ♫　最高门票：
             <strong className="pink">
-              {progress.cumulativeFragments}/{TRACK_CONFIG.fragmentGoal}
+              {progress.bestTickets}/{TRACK_CONFIG.ticketGoal}
             </strong>
           </p>
-          <div className="home-progress" aria-label="歌曲解锁进度">
+          <div className="home-progress" aria-label="最高门票进度">
             <i style={{ width: `${pct}%` }} />
           </div>
         </div>
@@ -232,17 +215,17 @@ function HomeScreen({
           <div className="home-road" />
           <img
             className="home-runner"
-            src={`${ASSET}player_fan.png`}
+            src={assetUrl("player_fan.png")}
             alt=""
           />
           <img
             className="home-ticket"
-            src={`${ASSET}collectible_ticket.png`}
+            src={`${ASSET}${TICKET_SPRITE}`}
             alt=""
           />
           <img
             className="home-stick"
-            src={`${ASSET}collectible_lightstick.png`}
+            src={`${ASSET}${LIGHTSTICK_SPRITE}`}
             alt=""
           />
         </div>
@@ -276,21 +259,39 @@ function RulesModal({ onClose }: { onClose: () => void }) {
         <h2>规则说明</h2>
         <div className="rule-list">
           <p>
-            <img src={`${ASSET}collectible_ticket.png`} alt="" />
-            <span><b>收集门票</b>可获得分数，用于提升最终成绩。</span>
+            <img src={`${ASSET}${TICKET_SPRITE}`} alt="" />
+            <span><b>门票 = 得分</b>在歌曲结束前尽量收集 100 张。</span>
           </p>
           <p>
-            <img src={`${ASSET}collectible_lyric.png`} alt="" />
-            <span><b>收集歌词碎片</b>，集齐 120 个可解锁下一首歌。</span>
+            <img src={`${ASSET}buff_magnet.png`} alt="" />
+            <span><b>磁铁 · 5 秒</b>自动吸取赛道上的门票。</span>
           </p>
           <p>
-            <img src={`${ASSET}buff_shield.png`} alt="" />
-            <span><b>护盾</b>可抵挡一次碰撞伤害，之后消失。</span>
+            <img src={`${ASSET}${LIGHTSTICK_SPRITE}`} alt="" />
+            <span><b>应援棒 · 5 秒</b>开启保护罩，碰到障碍也不会失败。</span>
           </p>
           <p>
-            <img src={`${ASSET}buff_dash.png`} alt="" />
-            <span><b>冲刺</b>可短时间提升速度，并撞开障碍。</span>
+            <img src={`${ASSET}obstacle_speaker.png`} alt="" />
+            <span><b>扁音响</b>横放地面，向上滑动跳过去。</span>
           </p>
+          <p>
+            <img src={`${ASSET}obstacle_construction_sign.png`} alt="" />
+            <span><b>指路牌</b>左右滑动，换道躲避。</span>
+          </p>
+          <p>
+            <span className="rule-banner-icon" aria-hidden="true">AHOF</span>
+            <span><b>高横幅</b>竹竿撑起的横幅，向下滑铲从下面钻过。</span>
+          </p>
+        </div>
+        <div className="rule-tiers">
+          <p>抵达终点按门票碎片数量定席位：</p>
+          <ul>
+            <li>⭐ 50 张以上 · 内场 VIP</li>
+            <li>🎫 30–49 张 · 正常观众席</li>
+            <li>🏔️ 10–29 张 · 山顶看台</li>
+            <li>❌ 不足 10 张 · 未能入场</li>
+          </ul>
+          <p className="rule-tier-warn">💀 途中撞到任何障碍物 = 赶路失败</p>
         </div>
         <div className="gesture-guide">
           <span>← →<b>换道</b></span>
@@ -306,27 +307,8 @@ function RulesModal({ onClose }: { onClose: () => void }) {
   );
 }
 
-function StatusMeter({
-  value,
-  max,
-}: {
-  icon: string;
-  label: string;
-  value: number;
-  max: number;
-}) {
-  return (
-    <div className="status-meter">
-      <span>
-        {Array.from({ length: 5 }).map((_, index) => (
-          <i
-            key={index}
-            className={index < Math.ceil((value / max) * 5) ? "active" : ""}
-          />
-        ))}
-      </span>
-    </div>
-  );
+function formatPowerupTime(seconds: number) {
+  return `00:${String(Math.max(0, Math.ceil(seconds))).padStart(2, "0")}`;
 }
 
 function RunHud({
@@ -336,74 +318,53 @@ function RunHud({
   ui: UiSnapshot;
   onPause: () => void;
 }) {
-  const diffLabel = DIFFICULTY_TABLE[ui.difficulty]?.label ?? "normal";
-  const diffEmoji =
-    diffLabel === "burst" ? "🔥" : diffLabel === "hard" ? "⚡" : diffLabel === "easy" ? "💚" : "🎵";
+  const activePowerups = [
+    {
+      id: "magnet",
+      label: "磁铁",
+      icon: "buff_magnet.png",
+      seconds: ui.magnet,
+    },
+    {
+      id: "lightstick",
+      label: "应援棒",
+      icon: LIGHTSTICK_SPRITE,
+      seconds: ui.lightstick,
+    },
+  ].filter((powerup) => powerup.seconds > 0);
+
   return (
     <>
       <header className="run-hud">
-        <div className="hud-topline">
-          <button className="pause-button" onClick={onPause} aria-label="暂停">
-            Ⅱ
-          </button>
-          <div className="hud-card hud-time">
-            <small>倒计时</small>
-            <b>00:{String(Math.ceil(ui.timeLeft)).padStart(2, "0")}</b>
-          </div>
-          <div className="hud-card hud-score">
-            <small>得分</small>
-            <b>{String(Math.round(ui.score)).padStart(6, "0")}</b>
-          </div>
-          <div className="hud-card hud-city">
-            <small>当前城市</small>
-            <b>{TRACK_CONFIG.city}</b>
-          </div>
-          <div className={`hud-card hud-difficulty diff-${diffLabel}`}>
-            <small>{diffEmoji} 难度</small>
-            <b>{diffLabel === "burst" ? "爆发" : diffLabel === "hard" ? "困难" : diffLabel === "easy" ? "简单" : "普通"}</b>
-          </div>
-        </div>
-        <div className="hud-bottomline">
-          <div className="hud-card hud-fragments">
-            <img src={`${ASSET}collectible_lyric.png`} alt="" />
-            <span><small>歌词碎片</small><b>{ui.cumulativeFragments}/120</b></span>
-          </div>
-          <div className="hud-card hud-tickets">
-            <img src={`${ASSET}collectible_ticket.png`} alt="" />
-            <span><small>门票</small><b>×{ui.tickets}</b></span>
-          </div>
-          <div className="hud-card hud-multiplier">
-            <small>连击 {ui.combo}</small>
-            <b>×{ui.multiplier}</b>
-          </div>
+        <div className="ticket-score">
+          <img src={`${ASSET}${TICKET_SPRITE}`} alt="" />
+          <span>
+            <small>门票 / 得分</small>
+            <b>{ui.tickets}/{TRACK_CONFIG.ticketGoal}</b>
+          </span>
         </div>
       </header>
 
-      <section className="buff-hud">
-        <img
-          className="panel-image"
-          src={`${ASSET}buff_status_panel.png`}
-          alt=""
-        />
-        <StatusMeter
-          icon="buff_magnet.png"
-          label="磁铁"
-          value={ui.magnet}
-          max={6}
-        />
-        <StatusMeter
-          icon="buff_shield.png"
-          label="护盾"
-          value={ui.shield}
-          max={1}
-        />
-        <StatusMeter
-          icon="buff_dash.png"
-          label="冲刺"
-          value={ui.dash}
-          max={4.5}
-        />
-      </section>
+      {activePowerups.length > 0 && (
+        <section
+          className={`powerup-hud ${activePowerups.length === 1 ? "single" : ""}`}
+          aria-label="当前道具"
+        >
+          {activePowerups.map((powerup) => (
+            <div className="powerup-card" key={powerup.id}>
+              <img src={`${ASSET}${powerup.icon}`} alt="" />
+              <span>
+                <small>{powerup.label}</small>
+                <b>{formatPowerupTime(powerup.seconds)}</b>
+              </span>
+            </div>
+          ))}
+        </section>
+      )}
+
+      <button className="floating-pause-button" onClick={onPause} aria-label="暂停">
+        Ⅱ
+      </button>
     </>
   );
 }
@@ -413,8 +374,8 @@ function RunFooter({ ui }: { ui: UiSnapshot }) {
   return (
     <footer className="run-footer">
       <div className="distance-row">
-        <span>🏁 距离终点</span>
-        <b>{Math.max(0, Math.ceil(350 - ui.distance))}米</b>
+        <span>🏁 距离目的地还有</span>
+        <b>{Math.max(0, Math.ceil(TRACK_CONFIG.finishDistance - ui.distance))}米</b>
         <span>演唱会 🚩</span>
       </div>
       <div className="route-bar"><i style={{ width: `${pct}%` }} /></div>
@@ -441,42 +402,59 @@ function ResultModal({
   onHome: () => void;
   onSoon: (label: string) => void;
 }) {
-  const pct = Math.min(
-    100,
-    (progress.cumulativeFragments / TRACK_CONFIG.fragmentGoal) * 100,
-  );
+  // 抵达终点 (success) → 按门票碎片数量判定入场等级；途中撞障碍 → 赶路失败。
+  const tier = computeEntryTier(ui.tickets);
+  const reachedFinish = success;
+  const admitted = reachedFinish && tier.id !== "denied";
+  const pct = Math.min(100, (ui.tickets / TRACK_CONFIG.ticketGoal) * 100);
+
+  const title = !reachedFinish
+    ? "赶路失败"
+    : admitted
+      ? "抵达现场！"
+      : "被拦在门外";
+  const kicker = !reachedFinish
+    ? "途中撞到障碍，赶不上开场了"
+    : admitted
+      ? `${tier.emoji} ${tier.label}`
+      : "门票碎片不足 10 张，没能入场";
+
   return (
     <div className="overlay result-overlay" role="dialog" aria-modal="true">
-      <section className={`result-panel ${success ? "success" : "failed"}`}>
-        {success ? (
+      <section className={`result-panel ${admitted ? "success" : "failed"}`}>
+        {admitted ? (
           <img
             className="result-badge"
             src={`${ASSET}result_badge_success.png`}
             alt=""
           />
         ) : (
-          <div className="fail-badge">!</div>
+          <div className="fail-badge">{reachedFinish ? "✕" : "!"}</div>
         )}
-        <h2>{success ? "抵达现场！" : "差一点赶上！"}</h2>
-        <p className="result-kicker">
-          {success ? "演唱会即将开场" : "避开障碍，再冲一次"}
-        </p>
+        <h2>{title}</h2>
+        <p className="result-kicker">{kicker}</p>
+        {reachedFinish && (
+          <div className="entry-tier">
+            <b>{tier.emoji} {tier.label}</b>
+            <span>{tier.seat}</span>
+          </div>
+        )}
         <div className="result-stats">
-          <span><small>总分</small><b>{Math.round(ui.score)}</b></span>
-          <span><small>门票数</small><b>{ui.tickets}</b></span>
-          <span><small>最高倍率</small><b>×{ui.maxMultiplier}</b></span>
-          <span><small>本局碎片</small><b>+{ui.fragmentsRun}</b></span>
+          <span><small>本局门票 / 得分</small><b>{ui.tickets}</b></span>
+          <span><small>历史最高</small><b>{progress.bestTickets}</b></span>
         </div>
         <div className="unlock-card">
           <span>
-            <b>歌曲进度</b>
-            <strong>{progress.cumulativeFragments}/120</strong>
+            <b>入场门槛</b>
+            <strong>{ui.tickets} 张</strong>
           </span>
           <div><i style={{ width: `${pct}%` }} /></div>
           <p>
-            {progress.cumulativeFragments >= TRACK_CONFIG.fragmentGoal
-              ? "下一首歌曲已解锁 · 待加入"
-              : `再收集 ${TRACK_CONFIG.fragmentGoal - progress.cumulativeFragments} 个碎片可解锁下一首`}
+            {tier.id === "vip"
+              ? "内场 VIP 达成！继续冲击更高排名"
+              : reachedFinish
+                ? `再收集 ${Math.max(1, (tier.id === "denied" ? 10 : tier.id === "hilltop" ? 30 : 50) - ui.tickets)} 张可升到下一档`
+                : `还差 ${Math.max(0, 10 - ui.tickets)} 张才能入场`}
           </p>
         </div>
         <div className="result-actions">
@@ -545,10 +523,12 @@ class AudioManager {
     (this.analyser as any).getByteFrequencyData(this.freqData);
     const data = this.freqData as Uint8Array;
 
-    const avgBand = (range: readonly [number, number]) => {
+    const avgBand = (range: readonly number[]) => {
       let sum = 0;
-      for (let i = range[0]; i <= range[1]; i++) sum += data[i]!;
-      return sum / ((range[1] - range[0] + 1) * 255);
+      const start = range[0] ?? 0;
+      const end = range[1] ?? start;
+      for (let i = start; i <= end; i++) sum += data[i]!;
+      return sum / ((end - start + 1) * 255);
     };
 
     const bands = {
@@ -658,11 +638,13 @@ export default function ConcertRushGame() {
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const audioManagerRef = useRef<AudioManager>(new AudioManager());
   const spritesRef = useRef<SpriteMap>({});
-  const runRef = useRef<GameRuntime>(makeRuntimeState(0));
+  const runRef = useRef<GameRuntime>(makeRuntimeState());
   const screenRef = useRef<Screen>("home");
   const savedRef = useRef<SavedProgress>(DEFAULT_PROGRESS);
   const countdownTimers = useRef<number[]>([]);
+  const victoryTimer = useRef<number | null>(null);
   const pointerStart = useRef({ x: 0, y: 0 });
+  const magnetTargetLanes = useRef<Map<string, number>>(new Map());
   const lastUiPush = useRef(0);
   const lastSpectrumSpawn = useRef(0);
 
@@ -683,28 +665,26 @@ export default function ConcertRushGame() {
   const pushUi = useCallback((trackTime: number) => {
     const run = runRef.current;
     setUi({
-      timeLeft: Math.max(0, TRACK_CONFIG.durationSec - trackTime),
       distance: distanceAtTime(trackTime),
-      score: run.score,
       tickets: run.tickets,
-      fragmentsRun: run.fragmentsRun,
-      cumulativeFragments: run.cumulativeFragments,
       combo: run.combo,
-      multiplier: run.multiplier,
-      maxMultiplier: run.maxMultiplier,
       magnet: Math.max(0, run.magnetUntil - trackTime),
-      shield: run.shield,
-      dash: Math.max(0, run.dashUntil - trackTime),
+      lightstick: Math.max(0, run.lightstickUntil - trackTime),
       judgement:
         run.judgementUntil > trackTime ? run.judgement : null,
-      difficulty: run.difficulty ?? 1,
-      spectrumEnergy: run.spectrumEnergy ?? 0,
     });
   }, []);
 
   const clearCountdownTimers = useCallback(() => {
     countdownTimers.current.forEach((timer) => window.clearTimeout(timer));
     countdownTimers.current = [];
+  }, []);
+
+  const clearVictoryTimer = useCallback(() => {
+    if (victoryTimer.current !== null) {
+      window.clearTimeout(victoryTimer.current);
+      victoryTimer.current = null;
+    }
   }, []);
 
   const commitResult = useCallback(
@@ -720,16 +700,7 @@ export default function ConcertRushGame() {
 
       const nextSaved: SavedProgress = {
         ...savedRef.current,
-        cumulativeFragments: Math.max(
-          savedRef.current.cumulativeFragments,
-          run.cumulativeFragments,
-        ),
-        bestScore: Math.max(savedRef.current.bestScore, Math.round(run.score)),
         bestTickets: Math.max(savedRef.current.bestTickets, run.tickets),
-        bestMultiplier: Math.max(
-          savedRef.current.bestMultiplier,
-          run.maxMultiplier,
-        ),
       };
       savedRef.current = nextSaved;
       setProgress(nextSaved);
@@ -737,6 +708,23 @@ export default function ConcertRushGame() {
     },
     [pushUi, setScreen],
   );
+
+  const revealVictory = useCallback(() => {
+    if (screenRef.current !== "playing") return;
+    const run = runRef.current;
+    audioRef.current?.pause();
+    run.mode = "result";
+    run.success = true;
+    run.lastTrackTime = TRACK_CONFIG.durationSec;
+    setSuccess(true);
+    setScreen("victory");
+    pushUi(TRACK_CONFIG.durationSec);
+    clearVictoryTimer();
+    victoryTimer.current = window.setTimeout(() => {
+      victoryTimer.current = null;
+      commitResult(true);
+    }, 1400);
+  }, [clearVictoryTimer, commitResult, pushUi, setScreen]);
 
   const beginRun = useCallback(() => {
     const audio = audioRef.current;
@@ -754,6 +742,8 @@ export default function ConcertRushGame() {
 
   const startGame = useCallback(() => {
     clearCountdownTimers();
+    clearVictoryTimer();
+    magnetTargetLanes.current.clear();
     const audio = audioRef.current;
     if (audio) {
       audio.currentTime = 0;
@@ -764,15 +754,13 @@ export default function ConcertRushGame() {
         /* non-blocking — game still works without spectrum analysis */
       });
     }
-    runRef.current = makeRuntimeState(
-      savedRef.current.cumulativeFragments,
-    );
+    runRef.current = makeRuntimeState();
     runRef.current.mode = "countdown";
     runRef.current.difficulty = 1;
     runRef.current.recentJudgements = [];
     runRef.current.supplementEvents = [];
     runRef.current.supplementEventId = 0;
-    setUi(initialUi(savedRef.current));
+    setUi(initialUi());
     setCountdown(3);
     setScreen("countdown");
 
@@ -786,10 +774,12 @@ export default function ConcertRushGame() {
       }, (index + 1) * 650);
       countdownTimers.current.push(timer);
     });
-  }, [beginRun, clearCountdownTimers, setScreen]);
+  }, [beginRun, clearCountdownTimers, clearVictoryTimer, setScreen]);
 
   const goHome = useCallback(() => {
     clearCountdownTimers();
+    clearVictoryTimer();
+    magnetTargetLanes.current.clear();
     const audio = audioRef.current;
     if (audio) {
       audio.pause();
@@ -797,12 +787,10 @@ export default function ConcertRushGame() {
     }
     // Clean up audio manager filter state
     audioManagerRef.current.removeMissFilter();
-    runRef.current = makeRuntimeState(
-      savedRef.current.cumulativeFragments,
-    );
-    setUi(initialUi(savedRef.current));
+    runRef.current = makeRuntimeState();
+    setUi(initialUi());
     setScreen("home");
-  }, [clearCountdownTimers, setScreen]);
+  }, [clearCountdownTimers, clearVictoryTimer, setScreen]);
 
   const pauseGame = useCallback(() => {
     if (screenRef.current !== "playing") return;
@@ -912,19 +900,23 @@ export default function ConcertRushGame() {
     const stored = readProgress();
     savedRef.current = stored;
     setProgress(stored);
-    runRef.current = makeRuntimeState(stored.cumulativeFragments);
-    setUi(initialUi(stored));
+    runRef.current = makeRuntimeState();
+    setUi(initialUi());
 
     const sprites: SpriteMap = {};
     Object.entries(SPRITE_FILES).forEach(([key, file]) => {
+      if (!file) return;
       const image = new Image();
-      image.src = `${ASSET}${file}`;
+      image.src = assetUrl(file);
       sprites[key] = image;
     });
     spritesRef.current = sprites;
 
-    return clearCountdownTimers;
-  }, [clearCountdownTimers]);
+    return () => {
+      clearCountdownTimers();
+      clearVictoryTimer();
+    };
+  }, [clearCountdownTimers, clearVictoryTimer]);
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
@@ -979,14 +971,16 @@ export default function ConcertRushGame() {
         x:
           width / 2 +
           (worldX - run.laneX * 0.12) * (f / z) * 0.42,
-        y: height * ROAD_VANISHING_C + (CAMERA_HEIGHT - worldY) * (f / z),
+        y:
+          height * ROAD_VANISHING_C +
+          (VIEW_TUNING.cameraHeight - worldY) * (f / z),
         scale: f / z,
       };
     };
 
     const polygon = (
       points: Array<{ x: number; y: number }>,
-      color: string,
+      color: string | CanvasGradient | CanvasPattern,
     ) => {
       context.fillStyle = color;
       context.beginPath();
@@ -994,6 +988,343 @@ export default function ConcertRushGame() {
       points.slice(1).forEach((point) => context.lineTo(point.x, point.y));
       context.closePath();
       context.fill();
+    };
+
+    const drawImageCover = (
+      image: HTMLImageElement | undefined,
+      width: number,
+      height: number,
+      scale = 1,
+      offsetY = 0,
+    ) => {
+      if (!image?.complete || !image.naturalWidth) return;
+      const imageRatio = image.naturalWidth / image.naturalHeight;
+      const canvasRatio = width / height;
+      const safeScale = Math.max(1, scale);
+      let sourceWidth = image.naturalWidth;
+      let sourceHeight = image.naturalHeight;
+
+      if (imageRatio > canvasRatio) {
+        sourceWidth = image.naturalHeight * canvasRatio;
+      } else {
+        sourceHeight = image.naturalWidth / canvasRatio;
+      }
+
+      sourceWidth /= safeScale;
+      sourceHeight /= safeScale;
+      const sourceX = (image.naturalWidth - sourceWidth) / 2;
+      const sourceY =
+        (image.naturalHeight - sourceHeight) / 2 -
+        offsetY * sourceHeight;
+
+      context.drawImage(
+        image,
+        sourceX,
+        Math.max(0, Math.min(image.naturalHeight - sourceHeight, sourceY)),
+        sourceWidth,
+        sourceHeight,
+        0,
+        0,
+        width,
+        height,
+      );
+    };
+
+    const drawCloudLayer = (
+      image: HTMLImageElement | undefined,
+      width: number,
+      height: number,
+      time: number,
+    ) => {
+      context.save();
+
+      const bandTop = height * VIEW_TUNING.horizonFogTopRatio;
+      const fogWidthRatio = Math.max(
+        0.2,
+        Math.min(1, VIEW_TUNING.horizonFogWidthRatio),
+      );
+      const bankWidth = width * fogWidthRatio;
+      const bankLeft = (width - bankWidth) / 2;
+      const bankHeight = height * VIEW_TUNING.horizonFogHeightRatio;
+      const edgeFadeWidth = Math.min(bankWidth * 0.16, width * 0.08);
+      const [fogR, fogG, fogB] = VIEW_TUNING.horizonFogColor;
+      const fog = (alpha: number) =>
+        `rgba(${fogR}, ${fogG}, ${fogB}, ${
+          alpha * VIEW_TUNING.horizonFogOpacity
+        })`;
+      const horizonFog = context.createLinearGradient(
+        0,
+        bandTop,
+        0,
+        bandTop + bankHeight,
+      );
+      horizonFog.addColorStop(0, fog(0));
+      horizonFog.addColorStop(0.2, fog(0.38));
+      horizonFog.addColorStop(0.46, fog(0.94));
+      horizonFog.addColorStop(0.63, fog(1));
+      horizonFog.addColorStop(0.82, fog(0.58));
+      horizonFog.addColorStop(1, fog(0));
+
+      context.fillStyle = horizonFog;
+      context.fillRect(
+        bankLeft + edgeFadeWidth,
+        bandTop,
+        bankWidth - edgeFadeWidth * 2,
+        bankHeight,
+      );
+
+      // Fade the left and right boundaries in small transparent steps so a
+      // narrower fog wall reveals the buildings without creating hard edges.
+      const edgeSlices = 16;
+      const sliceWidth = edgeFadeWidth / edgeSlices;
+      for (let index = 0; index < edgeSlices; index += 1) {
+        const strength = ((index + 1) / edgeSlices) ** 2;
+        context.globalAlpha = strength;
+        context.fillRect(
+          bankLeft + index * sliceWidth,
+          bandTop,
+          sliceWidth + 0.5,
+          bankHeight,
+        );
+        context.fillRect(
+          bankLeft + bankWidth - (index + 1) * sliceWidth,
+          bandTop,
+          sliceWidth + 0.5,
+          bankHeight,
+        );
+      }
+      context.globalAlpha = 1;
+
+      // A brighter elliptical core simulates the weak bloom visible where the
+      // road disappears, while keeping the upper sky and side buildings clear.
+      const roadEnd = project(
+        width,
+        height,
+        0,
+        0,
+        VIEW_TUNING.roadFarDepth,
+      );
+      const glowRadius = bankWidth * 0.5;
+      context.save();
+      context.translate(roadEnd.x, roadEnd.y);
+      context.scale(1, 0.42);
+      const roadEndGlow = context.createRadialGradient(
+        0,
+        0,
+        0,
+        0,
+        0,
+        glowRadius,
+      );
+      roadEndGlow.addColorStop(
+        0,
+        `rgba(${fogR}, ${fogG}, ${fogB}, ${
+          VIEW_TUNING.roadEndFogOpacity * 0.88
+        })`,
+      );
+      roadEndGlow.addColorStop(
+        0.3,
+        `rgba(${fogR}, ${fogG}, ${fogB}, ${
+          VIEW_TUNING.roadEndFogOpacity * 0.62
+        })`,
+      );
+      roadEndGlow.addColorStop(
+        0.68,
+        `rgba(${fogR}, ${fogG}, ${fogB}, ${
+          VIEW_TUNING.roadEndFogOpacity * 0.2
+        })`,
+      );
+      roadEndGlow.addColorStop(1, `rgba(${fogR}, ${fogG}, ${fogB}, 0)`);
+      context.fillStyle = roadEndGlow;
+      context.beginPath();
+      context.arc(0, 0, glowRadius, 0, Math.PI * 2);
+      context.fill();
+      context.restore();
+
+      if (image?.complete && image.naturalWidth) {
+        const layerWidth = bankWidth - edgeFadeWidth * 2;
+        const layerHeight = bankHeight;
+        const drift = (time * 1.2) % layerWidth;
+        context.globalAlpha = 0.24;
+        context.beginPath();
+        context.rect(
+          bankLeft + edgeFadeWidth,
+          bandTop,
+          layerWidth,
+          layerHeight,
+        );
+        context.clip();
+        for (
+          let x = bankLeft - layerWidth - drift;
+          x < bankLeft + bankWidth + layerWidth;
+          x += layerWidth
+        ) {
+          context.drawImage(image, x, bandTop, layerWidth, layerHeight);
+        }
+      }
+
+      context.restore();
+    };
+
+    const drawRoadDepthFog = (
+      width: number,
+      height: number,
+    ) => {
+      const fogStart = Math.max(
+        2.2,
+        Math.min(
+          VIEW_TUNING.roadFogStartDepth,
+          VIEW_TUNING.roadFarDepth - 1,
+        ),
+      );
+      const fogEnd = VIEW_TUNING.roadFarDepth;
+      const [fogR, fogG, fogB] = VIEW_TUNING.horizonFogColor;
+      const segments = 18;
+
+      for (let index = 0; index < segments; index += 1) {
+        const nearProgress = index / segments;
+        const farProgress = (index + 1) / segments;
+        const nearDepth =
+          fogStart + (fogEnd - fogStart) * nearProgress;
+        const farDepth =
+          fogStart + (fogEnd - fogStart) * farProgress;
+        const smoothFog =
+          farProgress *
+          farProgress *
+          (3 - 2 * farProgress);
+        const opacity =
+          smoothFog * VIEW_TUNING.roadEndFogOpacity * 0.74;
+
+        polygon(
+          [
+            project(
+              width,
+              height,
+              -VIEW_TUNING.roadHalfWidth,
+              0.045,
+              nearDepth,
+            ),
+            project(
+              width,
+              height,
+              VIEW_TUNING.roadHalfWidth,
+              0.045,
+              nearDepth,
+            ),
+            project(
+              width,
+              height,
+              VIEW_TUNING.roadHalfWidth,
+              0.045,
+              farDepth,
+            ),
+            project(
+              width,
+              height,
+              -VIEW_TUNING.roadHalfWidth,
+              0.045,
+              farDepth,
+            ),
+          ],
+          `rgba(${fogR}, ${fogG}, ${fogB}, ${opacity})`,
+        );
+      }
+    };
+
+    const roadsideCrops = [
+      [0, 0.16, 4.8],
+      [0.13, 0.25, 3.8],
+      [0.35, 0.2, 3.1],
+      [0.53, 0.23, 4.1],
+      [0.72, 0.2, 3.15],
+      [0.86, 0.14, 2.7],
+    ] as const;
+
+    const drawRoadsideScenery = (
+      image: HTMLImageElement | undefined,
+      width: number,
+      height: number,
+      time: number,
+    ) => {
+      if (!image?.complete || !image.naturalWidth) return;
+
+      const spacing = VIEW_TUNING.roadsideBuildingSpacing;
+      const travel = time * 8.4;
+      const revealRange =
+        VIEW_TUNING.itemRevealStartDepth -
+        VIEW_TUNING.itemFullyVisibleDepth;
+      const firstSlot = Math.ceil((travel + 2.2) / spacing);
+      const lastSlot = Math.floor((travel + MAX_RENDER_Z) / spacing);
+      const scenerySlots = Array.from(
+        { length: Math.max(0, lastSlot - firstSlot + 1) },
+        (_, offset) => {
+          const slot = firstSlot + offset;
+          return {
+            slot,
+            depth: slot * spacing - travel,
+          };
+        },
+      ).sort((a, b) => b.depth - a.depth);
+
+      const drawScenerySide = (
+        slot: number,
+        depth: number,
+        side: -1 | 1,
+      ) => {
+        const cropIndex =
+          ((slot + (side > 0 ? 3 : 0)) % roadsideCrops.length +
+            roadsideCrops.length) %
+          roadsideCrops.length;
+        const [sourceStart, sourceRatio, baseWorldHeight] =
+          roadsideCrops[cropIndex];
+
+        const sourceX = image.naturalWidth * sourceStart;
+        const sourceWidth = image.naturalWidth * sourceRatio;
+        const sourceHeight = image.naturalHeight;
+        const ground = project(
+          width,
+          height,
+          side *
+            (VIEW_TUNING.roadHalfWidth + 0.65),
+          0,
+          depth,
+        );
+        const spriteHeight =
+          baseWorldHeight *
+          VIEW_TUNING.roadsideBuildingScale *
+          ground.scale;
+        const spriteWidth =
+          spriteHeight * (sourceWidth / sourceHeight);
+
+        context.drawImage(
+          image,
+          sourceX,
+          0,
+          sourceWidth,
+          sourceHeight,
+          side < 0 ? ground.x - spriteWidth : ground.x,
+          ground.y - spriteHeight,
+          spriteWidth,
+          spriteHeight,
+        );
+      };
+
+      scenerySlots.forEach(({ slot, depth }) => {
+        const emergenceAlpha = Math.max(
+          0,
+          Math.min(
+            1,
+            (VIEW_TUNING.itemRevealStartDepth - depth) / revealRange,
+          ),
+        );
+        if (emergenceAlpha <= 0) return;
+
+        context.save();
+        context.globalAlpha = emergenceAlpha * 0.96;
+        drawScenerySide(slot, depth, -1);
+        drawScenerySide(slot, depth, 1);
+        context.restore();
+      });
     };
 
     const drawSprite = (
@@ -1011,6 +1342,59 @@ export default function ConcertRushGame() {
       const w = spriteWidth * point.scale;
       const h = spriteHeight * point.scale;
       context.drawImage(image, point.x - w / 2, point.y - h, w, h);
+    };
+
+    // Tutorial gesture arrow drawn above the first obstacle of each type.
+    const drawActionArrow = (
+      cx: number,
+      cy: number,
+      scale: number,
+      action: Action,
+      time: number,
+    ) => {
+      const s = Math.max(6, scale * 0.26);
+      const angle =
+        action === "jump" ? 0
+        : action === "slide" ? Math.PI
+        : action === "left" ? -Math.PI / 2
+        : Math.PI / 2;
+      // Bob along the pointing direction to suggest the swipe motion.
+      const bob = Math.sin(time * 7) * s * 0.28;
+
+      // Arrow shape pointing up, centered at origin (rotated per action).
+      const arrow: Array<{ x: number; y: number }> = [
+        { x: 0, y: -1.0 },
+        { x: -0.72, y: -0.12 },
+        { x: -0.3, y: -0.12 },
+        { x: -0.3, y: 0.85 },
+        { x: 0.3, y: 0.85 },
+        { x: 0.3, y: -0.12 },
+        { x: 0.72, y: -0.12 },
+      ];
+
+      context.save();
+      context.translate(cx, cy);
+      context.rotate(angle);
+      context.translate(0, -bob);
+      context.scale(s, s);
+      context.beginPath();
+      context.moveTo(arrow[0].x, arrow[0].y);
+      arrow.slice(1).forEach((p) => context.lineTo(p.x, p.y));
+      context.closePath();
+      context.restore();
+
+      // Draw fill + outline in screen space (stroke width independent of scale).
+      context.save();
+      context.shadowColor = "rgba(150, 240, 150, 0.9)";
+      context.shadowBlur = s * 0.8;
+      context.fillStyle = "#a8f0a0";
+      context.fill();
+      context.shadowBlur = 0;
+      context.lineJoin = "round";
+      context.lineWidth = Math.max(1.2, s * 0.14);
+      context.strokeStyle = "#2f6b3a";
+      context.stroke();
+      context.restore();
     };
 
     const activateItems = (time: number) => {
@@ -1043,22 +1427,24 @@ export default function ConcertRushGame() {
         if (run.removedItemIds.has(item.id)) continue;
         const delta = item.time - time;
         if (item.kind === "collectible") {
-          // Magnet: only auto-collect when VERY close (delta < 0.3) so the
-          // visual attraction animation has time to play before pickup.
-          const magnetCollect = magnetActive && delta < 0.45 && delta > -0.4;
+          const magnetCollect =
+            item.type === "ticket" &&
+            magnetActive &&
+            Math.abs(delta) < 0.08;
           const directCollect =
             item.lane === run.lane && Math.abs(delta) < 0.22;
           if (magnetCollect || directCollect) {
             Object.assign(run, collectItem(run, item.type, time));
             run.removedItemIds.add(item.id);
+            magnetTargetLanes.current.delete(item.id);
           }
         } else if (
           item.lane === run.lane &&
           Math.abs(delta) < 0.1
         ) {
           const dodged =
-            (item.type === "low" && jumping) ||
-            ((item.type === "over" || item.type === "crowd") && sliding);
+            (item.type === "speaker" && jumping) ||
+            (item.type === "banner" && sliding);
           if (dodged) {
             run.removedItemIds.add(item.id);
             run.score += 90 * run.multiplier;
@@ -1120,8 +1506,7 @@ export default function ConcertRushGame() {
         activateItems(time);
         updateCollisions(time);
         if (isRunComplete(time)) {
-          run.lastTrackTime = TRACK_CONFIG.durationSec;
-          commitResult(true);
+          revealVictory();
         }
         if (performance.now() - lastUiPush.current > 80) {
           lastUiPush.current = performance.now();
@@ -1132,13 +1517,21 @@ export default function ConcertRushGame() {
       const sprites = spritesRef.current;
       context.clearRect(0, 0, width, height);
 
-      // Base sky gradient — sampled from run_bg_city_a.png's own sky colors
+      // Fallback color behind the full-height reference background.
       const gradient = context.createLinearGradient(0, 0, 0, height);
       gradient.addColorStop(0, "#278efd");
-      gradient.addColorStop(0.35, "#4ab5fc");
-      gradient.addColorStop(1, "#3c507a");
+      gradient.addColorStop(0.5, "#74cbfa");
+      gradient.addColorStop(1, "#c7e9ff");
       context.fillStyle = gradient;
       context.fillRect(0, 0, width, height);
+
+      drawImageCover(
+        sprites.backdrop,
+        width,
+        height,
+        VIEW_TUNING.backgroundScale,
+        VIEW_TUNING.backgroundOffsetY,
+      );
 
       const beat = 60 / TRACK_CONFIG.bpm;
       const pulse = 0.5 + Math.cos((time % beat) / beat * Math.PI * 2) * 0.5;
@@ -1146,16 +1539,25 @@ export default function ConcertRushGame() {
       const diffLevel = run.difficulty || 1;
       const burstBoost = diffLevel >= 3 ? 1.5 : 1;
 
-      // ── Background art: crop to the SAFE zone only (no road/sidewalk) ──
-      if (sprites.city?.complete) {
-        const srcW = sprites.city.naturalWidth;
-        const srcH = sprites.city.naturalHeight;
-        const srcCropH = srcH * CITY_SAFE_CROP_RATIO;
-        const destH = height * ROAD_VANISHING_RATIO;
+      // The finish stage is hidden during the run and revealed only on victory.
+      const showFinishStage =
+        screenRef.current === "victory" ||
+        (screenRef.current === "result" && run.success);
+      if (
+        showFinishStage &&
+        sprites.stage?.complete &&
+        sprites.stage.naturalHeight
+      ) {
+        const stageHeight = height * VIEW_TUNING.concertStageHeightRatio;
+        const stageWidth =
+          stageHeight *
+          (sprites.stage.naturalWidth / sprites.stage.naturalHeight);
         context.drawImage(
-          sprites.city,
-          0, 0, srcW, srcCropH,
-          0, 0, width, destH,
+          sprites.stage,
+          width / 2 - stageWidth / 2,
+          height * VIEW_TUNING.concertStageTopRatio,
+          stageWidth,
+          stageHeight,
         );
       }
 
@@ -1198,95 +1600,409 @@ export default function ConcertRushGame() {
         context.globalAlpha = 1;
       }
 
-      // Sidewalk (cream/tan pavement) — matches run_bg_city_a.png sidewalk tone
+      const shoulderGradient = context.createLinearGradient(
+        0,
+        height * VIEW_TUNING.roadVanishingRatio,
+        0,
+        height,
+      );
+      shoulderGradient.addColorStop(0, "#5d7187");
+      shoulderGradient.addColorStop(1, "#263343");
+
+      // Cool dark shoulders keep the black road distinct from the blue skyline.
       polygon(
         [
           project(width, height, -17, 0, 2),
           project(width, height, 17, 0, 2),
-          project(width, height, 7, 0, 60),
-          project(width, height, -7, 0, 60),
+          project(
+            width,
+            height,
+            VIEW_TUNING.roadHalfWidth + 3.5,
+            0,
+            VIEW_TUNING.roadFarDepth,
+          ),
+          project(
+            width,
+            height,
+            -VIEW_TUNING.roadHalfWidth - 3.5,
+            0,
+            VIEW_TUNING.roadFarDepth,
+          ),
         ],
-        "#e9dfc9",
-      );
-      // Road asphalt — color-matched to the background art's road (#3c507a)
-      polygon(
-        [
-          project(width, height, -3.45, 0.02, 2),
-          project(width, height, 3.45, 0.02, 2),
-          project(width, height, 3.45, 0.02, 60),
-          project(width, height, -3.45, 0.02, 60),
-        ],
-        "#3c507a",
+        shoulderGradient,
       );
 
-      [-1.15, 1.15].forEach((laneMark) => {
+      const roadGradient = context.createLinearGradient(
+        0,
+        height * VIEW_TUNING.roadVanishingRatio,
+        0,
+        height,
+      );
+      roadGradient.addColorStop(0, "#263044");
+      roadGradient.addColorStop(0.42, "#121a28");
+      roadGradient.addColorStop(1, "#080c14");
+
+      // Near-black asphalt with a subtle navy horizon.
+      polygon(
+        [
+          project(width, height, -VIEW_TUNING.roadHalfWidth, 0.02, 2),
+          project(width, height, VIEW_TUNING.roadHalfWidth, 0.02, 2),
+          project(
+            width,
+            height,
+            VIEW_TUNING.roadHalfWidth,
+            0.02,
+            VIEW_TUNING.roadFarDepth,
+          ),
+          project(
+            width,
+            height,
+            -VIEW_TUNING.roadHalfWidth,
+            0.02,
+            VIEW_TUNING.roadFarDepth,
+          ),
+        ],
+        roadGradient,
+      );
+
+      [-VIEW_TUNING.roadHalfWidth, VIEW_TUNING.roadHalfWidth].forEach(
+        (roadEdge) => {
+          polygon(
+            [
+              project(width, height, roadEdge - 0.045, 0.035, 2),
+              project(width, height, roadEdge + 0.045, 0.035, 2),
+              project(
+                width,
+                height,
+                roadEdge + 0.045,
+                0.035,
+                VIEW_TUNING.roadFarDepth,
+              ),
+              project(
+                width,
+                height,
+                roadEdge - 0.045,
+                0.035,
+                VIEW_TUNING.roadFarDepth,
+              ),
+            ],
+            roadEdge < 0 ? "#ff77b5" : "#65dcff",
+          );
+        },
+      );
+
+      [
+        -VIEW_TUNING.laneSpacing / 2,
+        VIEW_TUNING.laneSpacing / 2,
+      ].forEach((laneMark) => {
         polygon(
           [
             project(width, height, laneMark - 0.025, 0.03, 2),
             project(width, height, laneMark + 0.025, 0.03, 2),
-            project(width, height, laneMark + 0.025, 0.03, 60),
-            project(width, height, laneMark - 0.025, 0.03, 60),
+            project(
+              width,
+              height,
+              laneMark + 0.025,
+              0.03,
+              VIEW_TUNING.roadFarDepth,
+            ),
+            project(
+              width,
+              height,
+              laneMark - 0.025,
+              0.03,
+              VIEW_TUNING.roadFarDepth,
+            ),
           ],
-          "#f4ede0",
+          "#d7f7ff",
         );
       });
 
       // Dashed lane-divider lines
       const flow = (time * 8.2) % 3.2;
-      for (let z = 2.2 - flow; z < 60; z += 3.2) {
+      for (
+        let z = 2.2 - flow;
+        z < VIEW_TUNING.roadFarDepth;
+        z += 3.2
+      ) {
         if (z < 1.3) continue;
         polygon(
           [
-            project(width, height, -3.25, 0.035, z),
-            project(width, height, 3.25, 0.035, z),
-            project(width, height, 3.25, 0.035, z + 0.18),
-            project(width, height, -3.25, 0.035, z + 0.18),
+            project(width, height, -VIEW_TUNING.roadHalfWidth + 0.2, 0.035, z),
+            project(width, height, VIEW_TUNING.roadHalfWidth - 0.2, 0.035, z),
+            project(width, height, VIEW_TUNING.roadHalfWidth - 0.2, 0.035, z + 0.18),
+            project(width, height, -VIEW_TUNING.roadHalfWidth + 0.2, 0.035, z + 0.18),
           ],
-          "rgba(232, 224, 204, .55)",
+          "rgba(105, 133, 165, .42)",
         );
       }
 
-      const worldLane = (lane: number) => lane * 2.18;
+      // Distance fog progressively removes the road color and lane contrast
+      // before the road reaches the bright horizon core.
+      if (!showFinishStage) {
+        drawRoadDepthFog(width, height);
+      }
+
+      // Roadside buildings and trees share the obstacle reveal depth, so they
+      // are already present behind the cloud bank and never pop into view.
+      if (!showFinishStage) {
+        drawRoadsideScenery(
+          sprites.roadsideCity,
+          width,
+          height,
+          time,
+        );
+      }
+
+      // The full-width blue-white fog wall blends the skyline, scenery and
+      // shortened road end without a visible rectangular cloud boundary.
+      if (!showFinishStage) {
+        drawCloudLayer(sprites.clouds, width, height, time);
+      }
+
+      const worldLane = (lane: number) => lane * VIEW_TUNING.laneSpacing;
+      // Sizes follow the "建议相对角色高度" reference table (角色高度 ≈ 0.97):
+      //   门票（收集物）        0.15–0.3 → ~0.3
+      //   应援棒 / 磁铁（增益）  0.3–0.5  → ~0.5，比普通收集物大
+      //   指路牌（横向闪避阻断）  0.8–1.2  → ~0.9
+      //   横幅、扁音响为特殊绘制，尺寸在各自分支里定义。
       const spriteSize: Record<string, [number, number]> = {
-        ticket: [0.56, 0.82],
-        lightstick: [0.64, 0.58],
-        fragment: [0.54, 0.62],
+        ticket: [0.34, 0.48],
+        lightstick: [0.78, 0.72],
         magnet: [0.72, 0.72],
-        shield: [0.72, 0.82],
-        dash: [0.82, 0.62],
-        low: [1.14, 1.24],
-        over: [1.62, 0.98],
-        block: [1.02, 1.44],
-        speaker: [1.02, 1.44],
-        crowd: [1.5, 1.2],
+        roadblock: [0.82, 0.90],
+        speaker: [0.75, 0.55],
       };
 
-      run.activeItems
+      const renderItems = run.activeItems
         .filter((item) => !run.removedItemIds.has(item.id))
         .map((item) => ({
           ...item,
           z: 5.4 + (item.time - time) * 8.4,
         }))
-        .filter((item) => item.z > 1.2 && item.z < MAX_RENDER_Z)
+        .filter((item) => item.z > 1.2 && item.z < MAX_RENDER_Z);
+
+      renderItems
         .sort((a, b) => b.z - a.z)
         .forEach((item) => {
-          const size = spriteSize[item.type] || [0.8, 0.8];
+          const baseSize = spriteSize[item.type] || [0.8, 0.8];
+          const visualScale =
+            item.kind === "collectible"
+              ? VIEW_TUNING.collectibleScale
+              : VIEW_TUNING.obstacleScale;
+          const size: [number, number] = [
+            baseSize[0] * visualScale,
+            baseSize[1] * visualScale,
+          ];
           const magnetActive = run.magnetUntil > time;
+          const revealRange =
+            VIEW_TUNING.itemRevealStartDepth -
+            VIEW_TUNING.itemFullyVisibleDepth;
+          const emergenceAlpha = Math.max(
+            0,
+            Math.min(
+              1,
+              (VIEW_TUNING.itemRevealStartDepth - item.z) / revealRange,
+            ),
+          );
+          context.save();
+          context.globalAlpha = emergenceAlpha;
 
-          // Magnet attraction: collectibles snap toward player fast.
-          // Square-root curve gives strong pull even at distance.
+          // Tickets stay on their original lane until they pass near the player.
+          // The target lane is captured once, so changing lanes does not make
+          // every distant ticket follow the player.
           let drawLane = item.lane;
           let magnetLift = 0;
-          if (item.kind === "collectible" && magnetActive && item.z < 25) {
-            const t = Math.max(0, 1 - item.z / 25);
-            const pullStrength = Math.sqrt(t) * 0.6 + 0.4; // 0.4 → 1.0, fast snap
-            drawLane = item.lane + (run.laneX - item.lane) * pullStrength;
-            magnetLift = Math.sin((25 - item.z) * 0.6) * 0.45 * pullStrength;
+          if (
+            item.kind === "collectible" &&
+            item.type === "ticket" &&
+            magnetActive &&
+            item.z < VIEW_TUNING.magnetPullStartDepth
+          ) {
+            if (!magnetTargetLanes.current.has(item.id)) {
+              magnetTargetLanes.current.set(item.id, run.lane);
+            }
+            const targetLane =
+              magnetTargetLanes.current.get(item.id) ?? run.lane;
+            const pullRange =
+              VIEW_TUNING.magnetPullStartDepth -
+              VIEW_TUNING.magnetPullEndDepth;
+            const pullProgress = Math.max(
+              0,
+              Math.min(
+                1,
+                (VIEW_TUNING.magnetPullStartDepth - item.z) / pullRange,
+              ),
+            );
+            const pullStrength =
+              pullProgress * pullProgress * (3 - 2 * pullProgress);
+            drawLane =
+              item.lane + (targetLane - item.lane) * pullStrength;
+            magnetLift = Math.sin(pullStrength * Math.PI) * 0.5;
           }
 
-          // "over" barriers float in the air — player slides UNDER them
-          const hazardLift =
-            item.kind === "hazard" && item.type === "over" ? 1.1 : 0;
+          // First obstacle of each type gets a floating gesture arrow hint.
+          if (item.kind === "hazard" && HAZARD_HINTS.has(item.id)) {
+            const hint = project(width, height, worldLane(drawLane), 2.0, item.z);
+            drawActionArrow(
+              hint.x,
+              hint.y,
+              hint.scale,
+              HAZARD_HINTS.get(item.id) as Action,
+              time,
+            );
+          }
+
+          if (item.kind === "hazard" && item.type === "banner") {
+            // 高横幅：两根霓虹立柱竖立在赛道两侧，中间挂起横幅（类似地铁跑酷的
+            // 滑铲栏架）。横幅下沿距地约 0.8（角色高度 ~0.97），迫使玩家滑铲通过。
+            const laneX = worldLane(drawLane);
+            const span = 0.98 * VIEW_TUNING.bannerWidth * VIEW_TUNING.obstacleScale;
+            const poleTopY = 1.5;
+            const bannerTopY = 1.34;
+            const bannerBottomY = 0.8;
+
+            const groundL = project(width, height, laneX - span, 0, item.z);
+            const groundR = project(width, height, laneX + span, 0, item.z);
+            const capL = project(width, height, laneX - span, poleTopY, item.z);
+            const capR = project(width, height, laneX + span, poleTopY, item.z);
+            const bTopL = project(width, height, laneX - span, bannerTopY, item.z);
+            const bTopR = project(width, height, laneX + span, bannerTopY, item.z);
+            const bBotL = project(width, height, laneX - span, bannerBottomY, item.z);
+            const bBotR = project(width, height, laneX + span, bannerBottomY, item.z);
+            const scale = groundL.scale;
+
+            context.save();
+
+            // ── 两根霓虹立柱：金属光泽柱身 + 顶端发光灯球 + 底座 ──
+            const drawPost = (
+              base: typeof groundL,
+              top: typeof capL,
+              neon: string,
+            ) => {
+              const wB = Math.max(3, 0.16 * base.scale);
+              const wT = Math.max(2, 0.16 * top.scale);
+              // 柱身：横向高光渐变，模拟圆柱金属反光
+              const body = context.createLinearGradient(
+                base.x - wB / 2,
+                0,
+                base.x + wB / 2,
+                0,
+              );
+              body.addColorStop(0, "#2a3550");
+              body.addColorStop(0.42, "#e9f2ff");
+              body.addColorStop(0.6, "#aebfdc");
+              body.addColorStop(1, "#242e46");
+              polygon(
+                [
+                  { x: base.x - wB / 2, y: base.y },
+                  { x: base.x + wB / 2, y: base.y },
+                  { x: top.x + wT / 2, y: top.y },
+                  { x: top.x - wT / 2, y: top.y },
+                ],
+                body,
+              );
+              // 底座
+              const baseW = wB * 1.9;
+              const baseH = Math.max(3, scale * 0.06);
+              polygon(
+                [
+                  { x: base.x - baseW / 2, y: base.y },
+                  { x: base.x + baseW / 2, y: base.y },
+                  { x: base.x + baseW / 2 - baseH * 0.4, y: base.y - baseH },
+                  { x: base.x - baseW / 2 + baseH * 0.4, y: base.y - baseH },
+                ],
+                "#1b2338",
+              );
+              // 顶端发光灯球
+              const orbR = wT * 1.25;
+              const glow = context.createRadialGradient(
+                top.x,
+                top.y,
+                0,
+                top.x,
+                top.y,
+                orbR * 2.2,
+              );
+              glow.addColorStop(0, neon);
+              glow.addColorStop(0.4, neon);
+              glow.addColorStop(1, "rgba(255,255,255,0)");
+              context.save();
+              context.globalCompositeOperation = "lighter";
+              context.fillStyle = glow;
+              context.beginPath();
+              context.arc(top.x, top.y, orbR * 2.2, 0, Math.PI * 2);
+              context.fill();
+              context.restore();
+              context.fillStyle = "#ffffff";
+              context.beginPath();
+              context.arc(top.x, top.y, orbR, 0, Math.PI * 2);
+              context.fill();
+              context.fillStyle = neon;
+              context.beginPath();
+              context.arc(top.x, top.y, orbR * 0.66, 0, Math.PI * 2);
+              context.fill();
+            };
+            drawPost(groundL, capL, "#ff77b5");
+            drawPost(groundR, capR, "#65dcff");
+
+            // ── 横幅布面 ──
+            polygon(
+              [
+                { x: bTopL.x, y: bTopL.y },
+                { x: bTopR.x, y: bTopR.y },
+                { x: bBotR.x, y: bBotR.y },
+                { x: bBotL.x, y: bBotL.y },
+              ],
+              "#f06ca7",
+            );
+            context.strokeStyle = "#fff7d1";
+            context.lineWidth = Math.max(1, scale * 0.035);
+            context.beginPath();
+            context.moveTo(bTopL.x, bTopL.y);
+            context.lineTo(bTopR.x, bTopR.y);
+            context.lineTo(bBotR.x, bBotR.y);
+            context.lineTo(bBotL.x, bBotL.y);
+            context.closePath();
+            context.stroke();
+
+            const bannerMidY = (bTopL.y + bBotL.y) / 2;
+            const bannerH = Math.abs(bBotL.y - bTopL.y);
+            context.fillStyle = "#fff7d1";
+            context.font = `900 ${Math.max(7, bannerH * 0.5)}px "Arial Black", sans-serif`;
+            context.textAlign = "center";
+            context.textBaseline = "middle";
+            context.fillText("AHOF", (bTopL.x + bTopR.x) / 2, bannerMidY);
+
+            context.restore();
+            context.restore();
+            return;
+          }
+
+          if (item.kind === "hazard" && item.type === "speaker") {
+            // 扁音响：整台音响横放在地面上，低矮而宽，玩家跳跃通过。
+            const gp = project(width, height, worldLane(drawLane), 0, item.z);
+            const sprite = sprites.speaker;
+            if (sprite?.complete && sprite.naturalWidth) {
+              const screenH =
+                0.55 * VIEW_TUNING.obstacleScale * gp.scale;
+              const aspect = sprite.naturalWidth / sprite.naturalHeight;
+              context.save();
+              // 旋转 90° 让竖版音响侧躺，保持原始比例、不拉伸。
+              context.translate(gp.x, gp.y - screenH / 2);
+              context.rotate(Math.PI / 2);
+              context.drawImage(
+                sprite,
+                -screenH / 2,
+                -(screenH / aspect) / 2,
+                screenH,
+                screenH / aspect,
+              );
+              context.restore();
+            }
+            context.restore();
+            return;
+          }
 
           drawSprite(
             sprites[item.type],
@@ -1296,8 +2012,9 @@ export default function ConcertRushGame() {
             item.z,
             size[0],
             size[1],
-            magnetLift + hazardLift,
+            magnetLift,
           );
+          context.restore();
         });
 
       const jumpAge = time - run.jumpStart;
@@ -1307,25 +2024,40 @@ export default function ConcertRushGame() {
           : 0;
       const sliding = run.slideUntil > time;
       const stepPhase = (time / beat) * Math.PI * 2;
-      const runBob =
-        isPlaying && !sliding && jump === 0
-          ? Math.abs(Math.sin(stepPhase)) * 0.075
-          : 0;
-      const ground = project(width, height, worldLane(run.laneX), 0, 5.25);
+      // Body stays steady while running; only the footstep dust conveys motion.
+      const runBob = 0;
+      const ground = project(
+        width,
+        height,
+        worldLane(run.laneX),
+        0,
+        VIEW_TUNING.playerDepth,
+      );
       const feet = project(
         width,
         height,
         worldLane(run.laneX),
         jump + runBob,
-        5.25,
+        VIEW_TUNING.playerDepth,
       );
       const scale = ground.scale;
-      const beatSquash =
-        isPlaying && !sliding && jump === 0
-          ? Math.sin(stepPhase) * 0.025
-          : 0;
-      const playerHeight = scale * 1.05 * (sliding ? 0.55 : 1);
-      const playerWidth = playerHeight * (sliding ? 1.15 : 0.86);
+      const activeSprite = sliding
+        ? sprites.playerSlide
+        : jump > 0
+          ? sprites.playerJump
+          : sprites.player;
+      const spriteReady =
+        !!activeSprite?.complete && activeSprite.naturalWidth > 0;
+      const spriteAspect = spriteReady
+        ? activeSprite.naturalWidth / activeSprite.naturalHeight
+        : sliding
+          ? 0.74
+          : 0.55;
+      // Dedicated slide art already reads as a low crouch, so it only needs a
+      // gentle height reduction rather than the old squash.
+      const playerHeight =
+        scale * 1.05 * VIEW_TUNING.playerScale * (sliding ? 0.72 : 1);
+      const playerWidth = playerHeight * spriteAspect;
       const playerX = Math.max(
         playerWidth / 2 + 6,
         Math.min(width - playerWidth / 2 - 6, feet.x),
@@ -1344,88 +2076,92 @@ export default function ConcertRushGame() {
       );
       context.fill();
 
-      if (run.shield > 0) {
-        context.strokeStyle = "#61e6ff";
-        context.lineWidth = 3;
-        context.beginPath();
-        context.arc(playerX, feet.y - scale * 0.55, scale * 0.55, 0, Math.PI * 2);
-        context.stroke();
-      }
-      if (run.dashUntil > time) {
-        context.strokeStyle = "#ffe85f";
-        context.lineWidth = 3;
-        for (let index = 0; index < 3; index += 1) {
-          context.beginPath();
-          context.moveTo(playerX - scale * (0.5 + index * 0.18), feet.y - index * 8);
-          context.lineTo(playerX - scale * (1.2 + index * 0.25), feet.y - index * 8);
-          context.stroke();
-        }
-      }
-
-      // Slide effect: dust cloud + backward motion streaks
-      if (sliding) {
-        // Dust cloud puffs behind player
-        context.fillStyle = "rgba(220, 230, 240, 0.6)";
-        for (let i = 0; i < 4; i++) {
-          const puffX = playerX - scale * (0.3 + i * 0.25);
-          const puffY = ground.y - scale * 0.02 + Math.sin(time * 20 + i) * 3;
-          const puffR = scale * (0.08 + i * 0.03);
-          context.beginPath();
-          context.arc(puffX, puffY, puffR, 0, Math.PI * 2);
-          context.fill();
-        }
-        // Speed lines streaking backward
-        context.strokeStyle = "rgba(255, 255, 255, 0.5)";
-        context.lineWidth = 2;
-        for (let i = 0; i < 3; i++) {
-          const lineY = feet.y - scale * (0.2 + i * 0.15);
-          const lineLen = scale * (0.6 + i * 0.2);
-          context.beginPath();
-          context.moveTo(playerX - scale * 0.3, lineY);
-          context.lineTo(playerX - scale * 0.3 - lineLen, lineY);
-          context.stroke();
-        }
-      }
-
-      const playerSprite = sprites.player;
-      if (playerSprite?.complete) {
+      const playerSprite = activeSprite;
+      if (spriteReady) {
         const laneMotion = run.lane - run.laneX;
         const actionAge = time - run.actionStart;
         const actionTilt =
           jump > 0
             ? Math.sin((jumpAge / 0.68) * Math.PI) * -0.08
             : sliding
-              ? -0.28
+              ? -0.05
               : 0;
         const laneTilt = Math.max(-0.2, Math.min(0.2, laneMotion * -0.38));
-        const flip =
-          !sliding && jump === 0 && Math.floor((time / beat) * 2) % 2
-            ? -1
-            : 1;
+        // Never mirror the whole body; only the legs animate while running.
+        const flip = 1;
+        // Walking cycle: keep the torso fixed and animate only the legs so the
+        // static back-view sprite reads as striding. The legs are mirrored every
+        // half beat (swapping which foot leads) and lift slightly on each step.
+        // The skirt hem sits in the upper band and overhangs the cut, hiding it.
+        const walkCycle = isPlaying && !sliding && jump === 0;
+        const legCut = 0.62;
+        const legOverlap = 0.05;
+        // stepNorm peaks mid-stride and returns to 0 at each footfall; the leg
+        // mirror swap happens exactly at footfall (sin == 0) so it is hidden.
+        const stepNorm = walkCycle ? Math.abs(Math.sin(stepPhase)) : 0;
+        const stepFlip =
+          walkCycle && Math.floor((time / beat) * 2) % 2 === 1 ? -1 : 1;
+        const legLift = stepNorm * playerHeight * 0.03;
+        // Body follows the stride: a gentle bounce lifts the whole figure at
+        // push-off and a small alternating lean keeps torso and legs coordinated.
+        const bodyBounce = stepNorm * playerHeight * 0.022;
+        const bodyLean = walkCycle ? Math.sin(stepPhase) * 0.03 : 0;
+        const bodyStretch = walkCycle ? stepNorm * 0.02 : 0;
         const drawPlayer = (
           x: number,
           alpha: number,
           extraScale = 1,
         ) => {
+          const sw = playerSprite.naturalWidth;
+          const sh = playerSprite.naturalHeight;
           context.save();
           context.globalAlpha = alpha;
-          context.translate(x, feet.y);
-          context.rotate(laneTilt + actionTilt);
+          context.translate(x, feet.y - bodyBounce);
+          context.rotate(laneTilt + actionTilt + bodyLean);
           context.scale(
-            flip * (1 - beatSquash) * extraScale,
-            (1 + beatSquash) * extraScale,
+            flip * (1 - bodyStretch) * extraScale,
+            (1 + bodyStretch) * extraScale,
           );
-          context.drawImage(
-            playerSprite,
-            340,
-            250,
-            570,
-            620,
-            -playerWidth / 2,
-            -playerHeight,
-            playerWidth,
-            playerHeight,
-          );
+          if (walkCycle) {
+            const lowerH = playerHeight * (1 - legCut);
+            // Legs (drawn first, behind the torso): mirror + slight lift.
+            context.save();
+            context.translate(0, -legLift);
+            context.scale(stepFlip, 1);
+            context.drawImage(
+              playerSprite,
+              0,
+              sh * legCut,
+              sw,
+              sh * (1 - legCut),
+              -playerWidth / 2,
+              -lowerH,
+              playerWidth,
+              lowerH,
+            );
+            context.restore();
+            // Upper body over the legs; extends past the cut so the skirt hides
+            // the seam.
+            context.drawImage(
+              playerSprite,
+              0,
+              0,
+              sw,
+              sh * (legCut + legOverlap),
+              -playerWidth / 2,
+              -playerHeight,
+              playerWidth,
+              playerHeight * (legCut + legOverlap),
+            );
+          } else {
+            context.drawImage(
+              playerSprite,
+              -playerWidth / 2,
+              -playerHeight,
+              playerWidth,
+              playerHeight,
+            );
+          }
           context.restore();
         };
 
@@ -1450,6 +2186,45 @@ export default function ConcertRushGame() {
         }
       }
 
+      if (run.lightstickUntil > time) {
+        const shieldPulse = 0.96 + pulse * 0.05;
+        const shieldX = playerX;
+        const shieldY = feet.y - playerHeight * 0.5;
+        const shieldRadiusX = playerWidth * 0.76 * shieldPulse;
+        const shieldRadiusY = playerHeight * 0.64 * shieldPulse;
+        const shieldGradient = context.createRadialGradient(
+          shieldX,
+          shieldY,
+          shieldRadiusX * 0.2,
+          shieldX,
+          shieldY,
+          shieldRadiusX,
+        );
+        shieldGradient.addColorStop(0, "rgba(109, 234, 255, 0.05)");
+        shieldGradient.addColorStop(0.72, "rgba(80, 214, 255, 0.13)");
+        shieldGradient.addColorStop(1, "rgba(111, 238, 255, 0.3)");
+
+        context.save();
+        context.fillStyle = shieldGradient;
+        context.strokeStyle = "rgba(218, 252, 255, 0.96)";
+        context.lineWidth = 3;
+        context.shadowColor = "#4fdcff";
+        context.shadowBlur = 15;
+        context.beginPath();
+        context.ellipse(
+          shieldX,
+          shieldY,
+          shieldRadiusX,
+          shieldRadiusY,
+          0,
+          0,
+          Math.PI * 2,
+        );
+        context.fill();
+        context.stroke();
+        context.restore();
+      }
+
       frame = requestAnimationFrame(draw);
     };
 
@@ -1460,7 +2235,7 @@ export default function ConcertRushGame() {
       cancelAnimationFrame(frame);
       window.removeEventListener("resize", resize);
     };
-  }, [commitResult, pushUi]);
+  }, [commitResult, pushUi, revealVictory]);
 
   const handlePointerDown = (event: React.PointerEvent<HTMLElement>) => {
     pointerStart.current = { x: event.clientX, y: event.clientY };
@@ -1514,7 +2289,10 @@ export default function ConcertRushGame() {
           </div>
         )}
 
-        {(screen === "playing" || screen === "paused" || screen === "result") && (
+        {(screen === "playing" ||
+          screen === "paused" ||
+          screen === "victory" ||
+          screen === "result") && (
           <>
             <RunHud ui={ui} onPause={pauseGame} />
             {ui.judgement && (
@@ -1523,8 +2301,15 @@ export default function ConcertRushGame() {
                 <small>COMBO {ui.combo}</small>
               </div>
             )}
-            <RunFooter ui={ui} />
+            {screen !== "victory" && <RunFooter ui={ui} />}
           </>
+        )}
+
+        {screen === "victory" && (
+          <div className="victory-arrival" aria-live="polite">
+            <b>抵达演唱会现场！</b>
+            <span>演出即将开始</span>
+          </div>
         )}
 
         {screen === "paused" && (

@@ -5,11 +5,28 @@ export const TRACK_CONFIG = Object.freeze({
   audioSrc: "/AHOF%20-%20RUN%20TO%20YOU.mp3",
   playbackStartSec: 0,
   durationSec: 45,
-  finishDistance: 350,
-  fragmentGoal: 120,
+  finishDistance: 999,
+  ticketGoal: 100,
   city: "星耀之城",
   bpm: 128,
 });
+
+// ─── Entry tiers — 抵达终点按门票碎片数量判定入场等级 ──────────────────────────
+// 撞到障碍物 = 赶路失败（不进入该表，直接失败）。
+export const ENTRY_TIERS = Object.freeze([
+  { min: 50, id: "vip",     emoji: "⭐", label: "内场 VIP 票", seat: "最近距离接触舞台，最佳体验" },
+  { min: 30, id: "normal",  emoji: "🎫", label: "正常观众席",   seat: "视野不错，能看清舞台" },
+  { min: 10, id: "hilltop", emoji: "🏔️", label: "山顶看台票",   seat: "距离舞台最远，但能看到全场" },
+  { min: 0,  id: "denied",  emoji: "❌", label: "未能入场",     seat: "被拦在检票口外" },
+]);
+
+/** Given collected tickets, return the entry tier reached at the finish line. */
+export function computeEntryTier(tickets) {
+  return (
+    ENTRY_TIERS.find((tier) => tickets >= tier.min) ??
+    ENTRY_TIERS[ENTRY_TIERS.length - 1]
+  );
+}
 
 // ─── Tunable Gameplay Parameters ────────────────────────────────────────────
 
@@ -20,6 +37,13 @@ export const TRACK_CONFIG = Object.freeze({
  *   1.4 = sparse (relaxed)
  * Scales all stepBeats AND min gap in ACTION_PHRASES. */
 export const OBSTACLE_DENSITY = 0.8;
+
+/**
+ * Minimum time between two obstacle rows.
+ * At 1.95 seconds, the third row is still fully behind the cloud when the
+ * nearest row reaches the player, so no hidden row needs to pop into view.
+ */
+export const MIN_HAZARD_GAP_SEC = 1.95;
 
 // ─── Dynamic Difficulty System ──────────────────────────────────────────────
 
@@ -94,27 +118,21 @@ const ACTION_PHRASES = [
 
 const REWARD_ROUTE = [
   "ticket",
+  "ticket",
   "lightstick",
-  "fragment",
   "ticket",
   "magnet",
   "ticket",
-  "fragment",
-  "lightstick",
-  "shield",
   "ticket",
-  "fragment",
-  "ticket",
-  "dash",
   "lightstick",
-  "fragment",
+  "ticket",
   "ticket",
   "magnet",
-  "fragment",
-  "shield",
   "ticket",
   "lightstick",
-  "fragment",
+  "ticket",
+  "ticket",
+  "lightstick",
 ];
 
 export function clampLane(lane) {
@@ -141,19 +159,22 @@ export function makeTrackEvents(config = TRACK_CONFIG) {
     })),
   ).sort((a, b) => a.time - b.time);
 
-  // 2. Enforce minimum gap (also scaled by density)
-  const MIN_GAP = 0.44 * OBSTACLE_DENSITY;
-  const filtered = [];
+  // 2. Enforce runner-style spacing so every row can emerge from the cloud.
+  const MIN_GAP = Math.max(
+    0.44 * OBSTACLE_DENSITY,
+    MIN_HAZARD_GAP_SEC,
+  );
+  const spaced = [];
   let lastTime = -10;
   for (const sa of scriptedActions) {
-    if (sa.time - lastTime >= MIN_GAP) {
-      filtered.push(sa);
-      lastTime = sa.time;
-    }
+    const scheduledTime = Math.max(sa.time, lastTime + MIN_GAP);
+    if (scheduledTime >= config.durationSec - 0.6) break;
+    spaced.push({ ...sa, time: scheduledTime });
+    lastTime = scheduledTime;
   }
 
   // 3. Build events with hazards and collectibles
-  return filtered.map((scripted, index) => {
+  return spaced.map((scripted, index) => {
     let action = scripted.action;
     const oldLane = routeLane;
 
@@ -164,13 +185,13 @@ export function makeTrackEvents(config = TRACK_CONFIG) {
     if (action === "right") routeLane = clampLane(routeLane + 1);
 
     // Hazard type: one visual per action type for instant recognition
-    //   jump  → low    (construction sign on ground, jump over)
-    //   slide → crowd  (people blocking lane, slide through)
-    //   left/right → speaker (side blocker, switch lane to dodge)
+    //   jump → speaker (jump over)
+    //   slide → banner (slide under)
+    //   left/right → roadblock (switch lanes to dodge)
     const hazardType =
-      action === "jump" ? "low"
-      : action === "slide" ? "crowd"
-      : "speaker";
+      action === "jump" ? "speaker"
+      : action === "slide" ? "banner"
+      : "roadblock";
 
     // Hazard goes in the lane the player must LEAVE (for left/right)
     // or the current lane (for jump/slide — dodge in place)
@@ -238,21 +259,18 @@ export function judgeAction(events, action, time, consumedIds = new Set()) {
   };
 }
 
-export function createInitialGameState(cumulativeFragments = 0) {
+export function createInitialGameState() {
   return {
     mode: "home",
     lane: 0,
     laneX: 0,
     score: 0,
     tickets: 0,
-    fragmentsRun: 0,
-    cumulativeFragments,
     combo: 0,
     multiplier: 1,
     maxMultiplier: 1,
     magnetUntil: 0,
-    shield: 0,
-    dashUntil: 0,
+    lightstickUntil: 0,
     jumpStart: -10,
     slideUntil: 0,
     lastAction: "run",
@@ -302,9 +320,8 @@ export function recordJudgement(state, grade, time) {
  *
  * Spectrum bands influence reward types:
  *   bass  peaks → more tickets
- *   synth peaks → more fragments
- *   hi-hat peaks → more lightsticks
- *   high difficulty → chance of bonus buff items
+ *   high-frequency peaks → more lightsticks
+ *   high difficulty → chance of magnet/lightstick powerups
  *
  * Note: Hazards are NOT generated here — they come exclusively from
  * the pre-choreographed ACTION_PHRASES to keep prompt-action-obstacle
@@ -317,8 +334,8 @@ export function generateSupplementEvents(state, time, spectrumBands) {
   let idCounter = state.supplementEventId;
   const beat = 60 / TRACK_CONFIG.bpm;
 
-  // Spectrum-driven bonus collectibles (spawned 2.5–4.5s ahead for visibility)
-  const leadSec = 2.5 + Math.random() * 2.0;
+  // Dynamic rewards are created behind the opaque cloud, never in visible road space.
+  const leadSec = 4.2 + Math.random() * 2.0;
 
   // Bass peak → extra ticket
   if (bass > 0.5) {
@@ -328,18 +345,6 @@ export function generateSupplementEvents(state, time, spectrumBands) {
       type: "ticket",
       lane: state.lane,
       time: time + leadSec,
-    });
-  }
-
-  // Synth/vocal peak → extra fragment
-  if ((highMid > 0.5 || lowMid > 0.55) && Math.random() < 0.7) {
-    const lane = Math.random() > 0.5 ? state.lane : [-1, 0, 1][Math.floor(Math.random() * 3)];
-    events.push({
-      id: `supp-reward-${idCounter++}`,
-      kind: "collectible",
-      type: "fragment",
-      lane,
-      time: time + leadSec + Math.random() * 0.8,
     });
   }
 
@@ -354,10 +359,10 @@ export function generateSupplementEvents(state, time, spectrumBands) {
     });
   }
 
-  // Higher difficulty + some spectrum energy → chance of bonus buff items
+  // Higher difficulty + some spectrum energy → chance of a bonus powerup
   const totalEnergy = bass + lowMid + highMid + high;
   if (totalEnergy > 0.5 && Math.random() < diff.extraHazardChance * 0.5) {
-    const buffType = Math.random() < 0.4 ? "magnet" : Math.random() < 0.7 ? "shield" : "dash";
+    const buffType = Math.random() < 0.5 ? "magnet" : "lightstick";
     const buffLane = [-1, 0, 1][Math.floor(Math.random() * 3)];
     events.push({
       id: `supp-buff-${idCounter++}`,
@@ -378,41 +383,21 @@ export function collectItem(state, type, time) {
   const next = { ...state };
 
   if (type === "ticket") {
-    next.tickets += 1;
-    next.score += 120 * next.multiplier;
+    next.tickets = Math.min(TRACK_CONFIG.ticketGoal, state.tickets + 1);
+    next.score += 120;
   } else if (type === "lightstick") {
-    next.combo += 2;
-    next.multiplier = computeMultiplier(next.combo);
-    next.maxMultiplier = Math.max(next.maxMultiplier, next.multiplier);
-    next.score += 80 * next.multiplier;
-  } else if (type === "fragment") {
-    next.fragmentsRun += 1;
-    next.cumulativeFragments = Math.min(
-      TRACK_CONFIG.fragmentGoal,
-      next.cumulativeFragments + 1,
-    );
-    next.score += 160 * next.multiplier;
+    next.lightstickUntil = Math.max(time, state.lightstickUntil) + 5;
   } else if (type === "magnet") {
-    next.magnetUntil = time + 6;
-    next.score += 100;
-  } else if (type === "shield") {
-    next.shield = 1;
-    next.score += 100;
-  } else if (type === "dash") {
-    next.dashUntil = time + 4.5;
-    next.score += 100;
+    next.magnetUntil = Math.max(time, state.magnetUntil) + 5;
   }
 
   return next;
 }
 
 export function resolveCollision(state, time) {
-  if (state.dashUntil > time) {
-    return { state: { ...state, score: state.score + 220 }, failed: false };
-  }
-  if (state.shield > 0) {
+  if (state.lightstickUntil > time) {
     return {
-      state: { ...state, shield: 0, combo: 0, multiplier: 1 },
+      state: { ...state },
       failed: false,
     };
   }
