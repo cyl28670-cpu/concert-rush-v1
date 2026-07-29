@@ -3,20 +3,23 @@
 import {
   useCallback,
   useEffect,
-  useMemo,
   useRef,
   useState,
 } from "react";
 import {
   TRACK_CONFIG,
+  DIFFICULTY_TABLE,
+  SPECTRUM_BANDS,
   clampLane,
   collectItem,
   computeMultiplier,
   createInitialGameState,
   distanceAtTime,
+  generateSupplementEvents,
   isRunComplete,
   judgeAction,
   makeTrackEvents,
+  recordJudgement,
   resolveCollision,
 } from "./logic.js";
 
@@ -46,8 +49,8 @@ type UiSnapshot = {
   shield: number;
   dash: number;
   judgement: string | null;
-  nextAction: Action | null;
-  burstCue: number;
+  difficulty: number;
+  spectrumEnergy: number;
 };
 
 type SpriteMap = Record<string, HTMLImageElement>;
@@ -65,8 +68,46 @@ type GameRuntime = Omit<BaseGameState, "activeItems" | "judgement"> & {
 };
 
 const STORAGE_KEY = "concert-rush-v1-progress";
+
+// ── Tunable View Parameters ────────────────────────────────────────────────
+/** How many seconds ahead obstacles activate and become visible.
+ *  Higher = obstacles appear further away, more reaction time.
+ *  At 6.5s, obstacles fade in near the horizon (small, distant).
+ *  At 4.1s (old default), they pop in much closer. */
+const VIEW_DISTANCE_SEC = 6.5;
+/** Max Z-depth for rendering (derived from VIEW_DISTANCE_SEC). */
+const MAX_RENDER_Z = 5.4 + VIEW_DISTANCE_SEC * 8.4;
 const EVENTS = makeTrackEvents();
 const ASSET = "/assets/";
+
+// ── Background/road seam calibration ──────────────────────────────────────
+// run_bg_city_a.png (694×727px) contains a full perspective street scene
+// with its own road. To avoid a "double road" effect, we only draw the
+// SAFE region of that image (buildings + stage, zero road/sidewalk pixels,
+// verified by pixel sampling) and let the Canvas-drawn 3D road — using the
+// exact same asphalt color (#3c507a) — continue seamlessly from there.
+const CITY_SAFE_CROP_RATIO = 360 / 727;
+
+// ── Camera & Perspective Tunables ─────────────────────────────────────────
+/** Vertical screen position (0-1) of the road's vanishing point.
+ *  0.20 = high horizon (road starts near top, more visible road)
+ *  0.50 = mid horizon (balanced)
+ *  0.65 = low horizon (more sky, less road) */
+const ROAD_VANISHING_RATIO = 0.20;
+
+/** Camera height in world units. Higher = camera looks down more.
+ *  2.25 = low angle (racing game feel)
+ *  3.0  = elevated (better overview of obstacles)
+ *  4.0  = near top-down */
+const CAMERA_HEIGHT = 3.0;
+
+/** Focal length factor (0-1 of screen height). Higher = more zoom. */
+const FOCAL_FACTOR = 0.82;
+
+// Derived: base Y offset so the road's far edge (z=60) lands at
+// ROAD_VANISHING_RATIO regardless of camera height.
+const ROAD_VANISHING_C =
+  ROAD_VANISHING_RATIO - CAMERA_HEIGHT * (FOCAL_FACTOR / 60);
 const DEFAULT_PROGRESS: SavedProgress = {
   cumulativeFragments: 0,
   bestScore: 0,
@@ -94,13 +135,6 @@ const SPRITE_FILES = {
   block: "obstacle_speaker.png",
   speaker: "obstacle_speaker.png",
   crowd: "obstacle_crowd.png",
-};
-
-const ACTION_LABEL: Record<Action, string> = {
-  left: "←",
-  right: "→",
-  jump: "↑",
-  slide: "↓",
 };
 
 function readProgress(): SavedProgress {
@@ -136,8 +170,8 @@ function initialUi(progress = DEFAULT_PROGRESS): UiSnapshot {
     shield: 0,
     dash: 0,
     judgement: null,
-    nextAction: "right",
-    burstCue: 0,
+    difficulty: 1,
+    spectrumEnergy: 0,
   };
 }
 
@@ -302,6 +336,9 @@ function RunHud({
   ui: UiSnapshot;
   onPause: () => void;
 }) {
+  const diffLabel = DIFFICULTY_TABLE[ui.difficulty]?.label ?? "normal";
+  const diffEmoji =
+    diffLabel === "burst" ? "🔥" : diffLabel === "hard" ? "⚡" : diffLabel === "easy" ? "💚" : "🎵";
   return (
     <>
       <header className="run-hud">
@@ -320,6 +357,10 @@ function RunHud({
           <div className="hud-card hud-city">
             <small>当前城市</small>
             <b>{TRACK_CONFIG.city}</b>
+          </div>
+          <div className={`hud-card hud-difficulty diff-${diffLabel}`}>
+            <small>{diffEmoji} 难度</small>
+            <b>{diffLabel === "burst" ? "爆发" : diffLabel === "hard" ? "困难" : diffLabel === "easy" ? "简单" : "普通"}</b>
           </div>
         </div>
         <div className="hud-bottomline">
@@ -448,10 +489,174 @@ function ResultModal({
   );
 }
 
+// ─── Procedural Audio Engine ─────────────────────────────────────────────────
+
+/** Manages Web Audio API: spectrum analysis, hit sounds, and Miss filter penalty.
+ *  All sounds are generated procedurally — no extra audio files required. */
+class AudioManager {
+  ctx: AudioContext | null = null;
+  source: MediaElementAudioSourceNode | null = null;
+  analyser: AnalyserNode | null = null;
+  filter: BiquadFilterNode | null = null;
+  filterActive = false;
+  freqData: Uint8Array | null = null;
+  audioEl: HTMLAudioElement | null = null;
+
+  /**
+   * Connect the <audio> element into the Web Audio graph.
+   * The chain: audioEl → source → filter → analyser → destination
+   */
+  async init(audioEl: HTMLAudioElement) {
+    if (this.ctx) return; // already initialized
+    this.audioEl = audioEl;
+    const ctx = new AudioContext();
+    // Resume if suspended (browser autoplay policy)
+    if (ctx.state === "suspended") await ctx.resume();
+
+    const source = ctx.createMediaElementSource(audioEl);
+    const filter = ctx.createBiquadFilter();
+    const analyser = ctx.createAnalyser();
+
+    filter.type = "lowpass";
+    filter.frequency.value = 20000; // fully open by default
+    filter.Q.value = 1;
+
+    analyser.fftSize = 256;
+    analyser.smoothingTimeConstant = 0.8;
+
+    // Connect: source → filter → analyser → destination
+    source.connect(filter);
+    filter.connect(analyser);
+    analyser.connect(ctx.destination);
+
+    this.ctx = ctx;
+    this.source = source;
+    this.filter = filter;
+    this.analyser = analyser;
+    this.freqData = new Uint8Array(analyser.frequencyBinCount);
+  }
+
+  /** Read spectrum data. Returns average energy value across the frequency range. */
+  getSpectrum(): { energy: number; bands: { bass: number; lowMid: number; highMid: number; high: number } } {
+    if (!this.analyser || !this.freqData) {
+      return { energy: 0, bands: { bass: 0, lowMid: 0, highMid: 0, high: 0 } };
+    }
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (this.analyser as any).getByteFrequencyData(this.freqData);
+    const data = this.freqData as Uint8Array;
+
+    const avgBand = (range: readonly [number, number]) => {
+      let sum = 0;
+      for (let i = range[0]; i <= range[1]; i++) sum += data[i]!;
+      return sum / ((range[1] - range[0] + 1) * 255);
+    };
+
+    const bands = {
+      bass:    avgBand(SPECTRUM_BANDS.bass),
+      lowMid:  avgBand(SPECTRUM_BANDS.lowMid),
+      highMid: avgBand(SPECTRUM_BANDS.highMid),
+      high:    avgBand(SPECTRUM_BANDS.high),
+    };
+    const energy = (bands.bass * 0.35 + bands.lowMid * 0.3 + bands.highMid * 0.25 + bands.high * 0.1);
+
+    return { energy, bands };
+  }
+
+  /** Play a procedural hit sound based on judgement grade. */
+  playHit(grade: string) {
+    if (!this.ctx || this.ctx.state === "suspended") return;
+
+    const ctx = this.ctx;
+    const now = ctx.currentTime;
+
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+
+    osc.connect(gain);
+    gain.connect(ctx.destination);
+
+    if (grade === "Perfect") {
+      // Bright staccato: high sine + triangle harmonics
+      osc.type = "sine";
+      osc.frequency.setValueAtTime(880, now);
+      osc.frequency.exponentialRampToValueAtTime(1320, now + 0.04);
+      osc.frequency.exponentialRampToValueAtTime(1760, now + 0.1);
+      gain.gain.setValueAtTime(0.12, now);
+      gain.gain.exponentialRampToValueAtTime(0.001, now + 0.15);
+      osc.start(now);
+      osc.stop(now + 0.16);
+    } else if (grade === "Great") {
+      // Warm mid tone
+      osc.type = "triangle";
+      osc.frequency.setValueAtTime(660, now);
+      osc.frequency.exponentialRampToValueAtTime(880, now + 0.06);
+      gain.gain.setValueAtTime(0.09, now);
+      gain.gain.exponentialRampToValueAtTime(0.001, now + 0.12);
+      osc.start(now);
+      osc.stop(now + 0.13);
+    } else if (grade === "Good") {
+      // Subtle low tick
+      osc.type = "sine";
+      osc.frequency.value = 440;
+      gain.gain.setValueAtTime(0.06, now);
+      gain.gain.exponentialRampToValueAtTime(0.001, now + 0.08);
+      osc.start(now);
+      osc.stop(now + 0.09);
+    }
+  }
+
+  /** Apply low-pass filter to BGM when player is struggling. */
+  applyMissFilter() {
+    if (!this.filter || this.filterActive) return;
+    this.filterActive = true;
+    const now = this.ctx?.currentTime ?? 0;
+    this.filter.frequency.linearRampToValueAtTime(600, now + 0.5);
+    this.filter.gain.linearRampToValueAtTime(-8, now + 0.5);
+  }
+
+  /** Restore BGM to full quality. */
+  removeMissFilter() {
+    if (!this.filter || !this.filterActive) return;
+    this.filterActive = false;
+    const now = this.ctx?.currentTime ?? 0;
+    this.filter.frequency.linearRampToValueAtTime(20000, now + 1.2);
+    this.filter.gain.linearRampToValueAtTime(0, now + 1.2);
+  }
+
+  /** Play a special sound when combo hits a milestone. */
+  playComboMilestone(milestone: number) {
+    if (!this.ctx || this.ctx.state === "suspended") return;
+    const ctx = this.ctx;
+    const now = ctx.currentTime;
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+    osc.connect(gain);
+    gain.connect(ctx.destination);
+    osc.type = "sine";
+    const baseFreq = milestone >= 32 ? 1200 : milestone >= 16 ? 900 : 660;
+    osc.frequency.setValueAtTime(baseFreq, now);
+    osc.frequency.exponentialRampToValueAtTime(baseFreq * 1.5, now + 0.2);
+    gain.gain.setValueAtTime(0.08, now);
+    gain.gain.exponentialRampToValueAtTime(0.001, now + 0.3);
+    osc.start(now);
+    osc.stop(now + 0.32);
+  }
+
+  destroy() {
+    this.ctx?.close();
+    this.ctx = null;
+    this.source = null;
+    this.filter = null;
+    this.analyser = null;
+    this.freqData = null;
+  }
+}
+
 export default function ConcertRushGame() {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const shellRef = useRef<HTMLElement | null>(null);
   const audioRef = useRef<HTMLAudioElement | null>(null);
+  const audioManagerRef = useRef<AudioManager>(new AudioManager());
   const spritesRef = useRef<SpriteMap>({});
   const runRef = useRef<GameRuntime>(makeRuntimeState(0));
   const screenRef = useRef<Screen>("home");
@@ -459,6 +664,7 @@ export default function ConcertRushGame() {
   const countdownTimers = useRef<number[]>([]);
   const pointerStart = useRef({ x: 0, y: 0 });
   const lastUiPush = useRef(0);
+  const lastSpectrumSpawn = useRef(0);
 
   const [screen, setScreenState] = useState<Screen>("home");
   const [countdown, setCountdown] = useState(3);
@@ -476,11 +682,6 @@ export default function ConcertRushGame() {
 
   const pushUi = useCallback((trackTime: number) => {
     const run = runRef.current;
-    const nextEvent = EVENTS.find(
-      (event: { id: string; time: number }) =>
-        event.time >= trackTime - 0.12 &&
-        !run.consumedBeatIds.has(event.id),
-    );
     setUi({
       timeLeft: Math.max(0, TRACK_CONFIG.durationSec - trackTime),
       distance: distanceAtTime(trackTime),
@@ -496,14 +697,8 @@ export default function ConcertRushGame() {
       dash: Math.max(0, run.dashUntil - trackTime),
       judgement:
         run.judgementUntil > trackTime ? run.judgement : null,
-      nextAction:
-        nextEvent && nextEvent.time - trackTime < 1.2
-          ? (nextEvent.action as Action)
-          : null,
-      burstCue:
-        nextEvent && nextEvent.time - trackTime < 1.2 && nextEvent.burst
-          ? Math.max(1, nextEvent.chainLength - nextEvent.chainIndex)
-          : 0,
+      difficulty: run.difficulty ?? 1,
+      spectrumEnergy: run.spectrumEnergy ?? 0,
     });
   }, []);
 
@@ -564,11 +759,19 @@ export default function ConcertRushGame() {
       audio.currentTime = 0;
       audio.volume = 0;
       void audio.play().catch(() => undefined);
+      // Initialize Web Audio API pipeline
+      audioManagerRef.current.init(audio).catch(() => {
+        /* non-blocking — game still works without spectrum analysis */
+      });
     }
     runRef.current = makeRuntimeState(
       savedRef.current.cumulativeFragments,
     );
     runRef.current.mode = "countdown";
+    runRef.current.difficulty = 1;
+    runRef.current.recentJudgements = [];
+    runRef.current.supplementEvents = [];
+    runRef.current.supplementEventId = 0;
     setUi(initialUi(savedRef.current));
     setCountdown(3);
     setScreen("countdown");
@@ -592,6 +795,8 @@ export default function ConcertRushGame() {
       audio.pause();
       audio.currentTime = 0;
     }
+    // Clean up audio manager filter state
+    audioManagerRef.current.removeMissFilter();
     runRef.current = makeRuntimeState(
       savedRef.current.cumulativeFragments,
     );
@@ -677,6 +882,26 @@ export default function ConcertRushGame() {
         run.score += judged.score * run.multiplier;
         run.judgement = judged.grade;
         run.judgementUntil = time + 0.72;
+        // Record for dynamic difficulty
+        Object.assign(run, recordJudgement(run, judged.grade, time));
+        // Procedural hit sound
+        audioManagerRef.current.playHit(judged.grade);
+        // Combo milestone fanfare
+        if (run.combo === 8 || run.combo === 16 || run.combo === 32) {
+          audioManagerRef.current.playComboMilestone(run.combo);
+        }
+        // Clear Miss filter if recovering
+        audioManagerRef.current.removeMissFilter();
+      } else {
+        // No matching beat → potential miss
+        Object.assign(run, recordJudgement(run, "miss", time));
+        // Apply low-pass filter penalty on consecutive misses
+        const recentMisses = run.recentJudgements
+          .slice(-3)
+          .filter((j: string) => j === "miss").length;
+        if (recentMisses >= 3) {
+          audioManagerRef.current.applyMissFilter();
+        }
       }
       pushUi(time);
     },
@@ -748,15 +973,13 @@ export default function ConcertRushGame() {
       depth: number,
     ) => {
       const run = runRef.current;
-      const f = height * 0.82;
+      const f = height * FOCAL_FACTOR;
       const z = Math.max(1, depth);
       return {
-        // The background art uses a narrow three-lane perspective. Compressing
-        // the horizontal projection keeps both outer lane centers on-screen.
         x:
           width / 2 +
           (worldX - run.laneX * 0.12) * (f / z) * 0.42,
-        y: height * 0.37 + (2.25 - worldY) * (f / z),
+        y: height * ROAD_VANISHING_C + (CAMERA_HEIGHT - worldY) * (f / z),
         scale: f / z,
       };
     };
@@ -795,7 +1018,7 @@ export default function ConcertRushGame() {
       for (const event of EVENTS) {
         for (const item of event.items) {
           if (
-            item.time - time <= 4.1 &&
+            item.time - time <= VIEW_DISTANCE_SEC &&
             item.time - time > -0.9 &&
             !run.activatedItemIds.has(item.id)
           ) {
@@ -820,7 +1043,9 @@ export default function ConcertRushGame() {
         if (run.removedItemIds.has(item.id)) continue;
         const delta = item.time - time;
         if (item.kind === "collectible") {
-          const magnetCollect = magnetActive && delta < 0.85 && delta > -0.4;
+          // Magnet: only auto-collect when VERY close (delta < 0.3) so the
+          // visual attraction animation has time to play before pickup.
+          const magnetCollect = magnetActive && delta < 0.45 && delta > -0.4;
           const directCollect =
             item.lane === run.lane && Math.abs(delta) < 0.22;
           if (magnetCollect || directCollect) {
@@ -864,6 +1089,33 @@ export default function ConcertRushGame() {
       run.lastTrackTime = time;
       run.laneX += (run.lane - run.laneX) * 0.22;
 
+      // ─── Spectrum Analysis & Supplementary Event Generation ───────────
+      if (isPlaying) {
+        const audioManager = audioManagerRef.current;
+        const { energy, bands } = audioManager.getSpectrum();
+        run.spectrumEnergy = energy;
+        run.spectrumBands = bands;
+
+        // Generate supplementary events every ~0.5s based on spectrum peaks
+        const beat = 60 / TRACK_CONFIG.bpm;
+        if (time - lastSpectrumSpawn.current > beat * 1.2) {
+          lastSpectrumSpawn.current = time;
+          const { events: suppEvents, supplementEventId } =
+            generateSupplementEvents(run, time, bands);
+          run.supplementEventId = supplementEventId;
+          // Activate new supplement events into the active items pool
+          for (const ev of suppEvents) {
+            if (!run.activatedItemIds.has(ev.id)) {
+              run.activatedItemIds.add(ev.id);
+              run.activeItems.push({
+                ...ev,
+                kind: ev.kind as ActiveItem["kind"],
+              } as ActiveItem);
+            }
+          }
+        }
+      }
+
       if (isPlaying) {
         activateItems(time);
         updateCollisions(time);
@@ -879,23 +1131,74 @@ export default function ConcertRushGame() {
 
       const sprites = spritesRef.current;
       context.clearRect(0, 0, width, height);
+
+      // Base sky gradient — sampled from run_bg_city_a.png's own sky colors
       const gradient = context.createLinearGradient(0, 0, 0, height);
-      gradient.addColorStop(0, "#63c9f3");
-      gradient.addColorStop(0.45, "#b8e8ff");
-      gradient.addColorStop(1, "#40526a");
+      gradient.addColorStop(0, "#278efd");
+      gradient.addColorStop(0.35, "#4ab5fc");
+      gradient.addColorStop(1, "#3c507a");
       context.fillStyle = gradient;
       context.fillRect(0, 0, width, height);
 
       const beat = 60 / TRACK_CONFIG.bpm;
       const pulse = 0.5 + Math.cos((time % beat) / beat * Math.PI * 2) * 0.5;
+      const energy = run.spectrumEnergy || 0;
+      const diffLevel = run.difficulty || 1;
+      const burstBoost = diffLevel >= 3 ? 1.5 : 1;
+
+      // ── Background art: crop to the SAFE zone only (no road/sidewalk) ──
       if (sprites.city?.complete) {
-        context.globalAlpha = 0.92;
-        context.drawImage(sprites.city, 0, 0, width, height * 0.52);
-        context.globalAlpha = 1;
+        const srcW = sprites.city.naturalWidth;
+        const srcH = sprites.city.naturalHeight;
+        const srcCropH = srcH * CITY_SAFE_CROP_RATIO;
+        const destH = height * ROAD_VANISHING_RATIO;
+        context.drawImage(
+          sprites.city,
+          0, 0, srcW, srcCropH,
+          0, 0, width, destH,
+        );
       }
-      context.fillStyle = `rgba(255, 115, 187, ${0.06 + pulse * 0.08})`;
+
+      // Spectrum-reactive pink overlay (upper area only)
+      const overlayAlpha = 0.06 + pulse * 0.08 + energy * 0.1 * burstBoost;
+      context.fillStyle = `rgba(255, 115, 187, ${Math.min(0.3, overlayAlpha)})`;
       context.fillRect(0, 0, width, height * 0.5);
 
+      // Burst-mode vignette when difficulty is high
+      if (diffLevel >= 3) {
+        const vigAlpha = 0.04 + pulse * 0.05;
+        const vigGrad = context.createRadialGradient(
+          width / 2, height * 0.25, width * 0.4,
+          width / 2, height * 0.25, width * 0.9,
+        );
+        vigGrad.addColorStop(0, `rgba(255, 215, 60, 0)`);
+        vigGrad.addColorStop(1, `rgba(255, 80, 120, ${vigAlpha})`);
+        context.fillStyle = vigGrad;
+        context.fillRect(0, 0, width, height);
+      }
+
+      // Spectrum bars (small visualization at top)
+      if (isPlaying && energy > 0.1) {
+        const barCount = 24;
+        const barW = Math.max(1, width / barCount - 2);
+        const barMaxH = height * 0.04;
+        const { bass, lowMid, highMid, high } = run.spectrumBands;
+        context.globalAlpha = 0.35;
+        for (let i = 0; i < barCount; i++) {
+          let val: number;
+          if (i < 6) val = bass;
+          else if (i < 12) val = lowMid;
+          else if (i < 18) val = highMid;
+          else val = high;
+          const h = Math.max(1, val * barMaxH * 1.5);
+          const hue = 280 + i * 8;
+          context.fillStyle = `hsla(${hue}, 85%, 60%, 0.7)`;
+          context.fillRect(i * (barW + 2), height * 0.005, barW, h);
+        }
+        context.globalAlpha = 1;
+      }
+
+      // Sidewalk (cream/tan pavement) — matches run_bg_city_a.png sidewalk tone
       polygon(
         [
           project(width, height, -17, 0, 2),
@@ -903,8 +1206,9 @@ export default function ConcertRushGame() {
           project(width, height, 7, 0, 60),
           project(width, height, -7, 0, 60),
         ],
-        "#d7e1e5",
+        "#e9dfc9",
       );
+      // Road asphalt — color-matched to the background art's road (#3c507a)
       polygon(
         [
           project(width, height, -3.45, 0.02, 2),
@@ -912,7 +1216,7 @@ export default function ConcertRushGame() {
           project(width, height, 3.45, 0.02, 60),
           project(width, height, -3.45, 0.02, 60),
         ],
-        "#4b596b",
+        "#3c507a",
       );
 
       [-1.15, 1.15].forEach((laneMark) => {
@@ -923,10 +1227,11 @@ export default function ConcertRushGame() {
             project(width, height, laneMark + 0.025, 0.03, 60),
             project(width, height, laneMark - 0.025, 0.03, 60),
           ],
-          "#e9f3f5",
+          "#f4ede0",
         );
       });
 
+      // Dashed lane-divider lines
       const flow = (time * 8.2) % 3.2;
       for (let z = 2.2 - flow; z < 60; z += 3.2) {
         if (z < 1.3) continue;
@@ -937,7 +1242,7 @@ export default function ConcertRushGame() {
             project(width, height, 3.25, 0.035, z + 0.18),
             project(width, height, -3.25, 0.035, z + 0.18),
           ],
-          "rgba(22, 35, 53, .36)",
+          "rgba(232, 224, 204, .55)",
         );
       }
 
@@ -962,23 +1267,36 @@ export default function ConcertRushGame() {
           ...item,
           z: 5.4 + (item.time - time) * 8.4,
         }))
-        .filter((item) => item.z > 1.2 && item.z < 55)
+        .filter((item) => item.z > 1.2 && item.z < MAX_RENDER_Z)
         .sort((a, b) => b.z - a.z)
         .forEach((item) => {
           const size = spriteSize[item.type] || [0.8, 0.8];
-          const magnetLift =
-            item.kind === "collectible" && run.magnetUntil > time && item.z < 14
-              ? Math.sin((14 - item.z) * 0.3) * 0.25
-              : 0;
+          const magnetActive = run.magnetUntil > time;
+
+          // Magnet attraction: collectibles snap toward player fast.
+          // Square-root curve gives strong pull even at distance.
+          let drawLane = item.lane;
+          let magnetLift = 0;
+          if (item.kind === "collectible" && magnetActive && item.z < 25) {
+            const t = Math.max(0, 1 - item.z / 25);
+            const pullStrength = Math.sqrt(t) * 0.6 + 0.4; // 0.4 → 1.0, fast snap
+            drawLane = item.lane + (run.laneX - item.lane) * pullStrength;
+            magnetLift = Math.sin((25 - item.z) * 0.6) * 0.45 * pullStrength;
+          }
+
+          // "over" barriers float in the air — player slides UNDER them
+          const hazardLift =
+            item.kind === "hazard" && item.type === "over" ? 1.1 : 0;
+
           drawSprite(
             sprites[item.type],
             width,
             height,
-            worldLane(item.lane),
+            worldLane(drawLane),
             item.z,
             size[0],
             size[1],
-            magnetLift,
+            magnetLift + hazardLift,
           );
         });
 
@@ -1006,8 +1324,8 @@ export default function ConcertRushGame() {
         isPlaying && !sliding && jump === 0
           ? Math.sin(stepPhase) * 0.025
           : 0;
-      const playerHeight = scale * 1.05 * (sliding ? 0.58 : 1);
-      const playerWidth = playerHeight * 0.86;
+      const playerHeight = scale * 1.05 * (sliding ? 0.55 : 1);
+      const playerWidth = playerHeight * (sliding ? 1.15 : 0.86);
       const playerX = Math.max(
         playerWidth / 2 + 6,
         Math.min(width - playerWidth / 2 - 6, feet.x),
@@ -1044,6 +1362,31 @@ export default function ConcertRushGame() {
         }
       }
 
+      // Slide effect: dust cloud + backward motion streaks
+      if (sliding) {
+        // Dust cloud puffs behind player
+        context.fillStyle = "rgba(220, 230, 240, 0.6)";
+        for (let i = 0; i < 4; i++) {
+          const puffX = playerX - scale * (0.3 + i * 0.25);
+          const puffY = ground.y - scale * 0.02 + Math.sin(time * 20 + i) * 3;
+          const puffR = scale * (0.08 + i * 0.03);
+          context.beginPath();
+          context.arc(puffX, puffY, puffR, 0, Math.PI * 2);
+          context.fill();
+        }
+        // Speed lines streaking backward
+        context.strokeStyle = "rgba(255, 255, 255, 0.5)";
+        context.lineWidth = 2;
+        for (let i = 0; i < 3; i++) {
+          const lineY = feet.y - scale * (0.2 + i * 0.15);
+          const lineLen = scale * (0.6 + i * 0.2);
+          context.beginPath();
+          context.moveTo(playerX - scale * 0.3, lineY);
+          context.lineTo(playerX - scale * 0.3 - lineLen, lineY);
+          context.stroke();
+        }
+      }
+
       const playerSprite = sprites.player;
       if (playerSprite?.complete) {
         const laneMotion = run.lane - run.laneX;
@@ -1052,7 +1395,7 @@ export default function ConcertRushGame() {
           jump > 0
             ? Math.sin((jumpAge / 0.68) * Math.PI) * -0.08
             : sliding
-              ? -0.1
+              ? -0.28
               : 0;
         const laneTilt = Math.max(-0.2, Math.min(0.2, laneMotion * -0.38));
         const flip =
@@ -1139,11 +1482,6 @@ export default function ConcertRushGame() {
     }
   };
 
-  const cueLabel = useMemo(
-    () => (ui.nextAction ? ACTION_LABEL[ui.nextAction] : null),
-    [ui.nextAction],
-  );
-
   return (
     <main className="game-stage">
       <section
@@ -1179,16 +1517,6 @@ export default function ConcertRushGame() {
         {(screen === "playing" || screen === "paused" || screen === "result") && (
           <>
             <RunHud ui={ui} onPause={pauseGame} />
-            <div
-              className={`beat-prompt ${cueLabel ? "show" : ""} ${
-                ui.burstCue ? "burst" : ""
-              }`}
-            >
-              <b>{cueLabel}</b>
-              <span>
-                {ui.burstCue ? `转音连换 ×${ui.burstCue}` : "跟上节拍"}
-              </span>
-            </div>
             {ui.judgement && (
               <div className={`judgement ${ui.judgement.toLowerCase()}`}>
                 {ui.judgement}
