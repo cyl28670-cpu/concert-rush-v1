@@ -44,3 +44,16 @@ next-env.d.ts
 /.wrangler/
 /outputs/
 /work/
+
+# project backups / embedded repos
+/.git_disabled_/
+
+# docker
+/.with/
+
+# experimental / unused files
+/app/game/DebugPanel.tsx
+/app/game/chartGenerator.js
+/app/game/chartPlayer.js
+/app/spectrumMapper.js
+/public/assets/coin-pickup.mp3
