@@ -50,10 +50,3 @@ next-env.d.ts
 
 # docker
 /.with/
-
-# experimental / unused files
-/app/game/DebugPanel.tsx
-/app/game/chartGenerator.js
-/app/game/chartPlayer.js
-/app/spectrumMapper.js
-/public/assets/coin-pickup.mp3
