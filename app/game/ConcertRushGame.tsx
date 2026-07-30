@@ -102,6 +102,7 @@ type PendingPickup = {
 };
 type GameRuntime = Omit<BaseGameState, "activeItems" | "judgement"> & {
   activeItems: ActiveItem[];
+  passedHazardIds: Set<string>;
   judgement: string | null;
   pickupParticles: PickupParticle[];
   pickupTexts: PickupText[];
@@ -126,11 +127,15 @@ const PICKUP_COLORS: Record<string, string> = {
 const VIEW_DISTANCE_SEC = 6.5;
 /** Max Z-depth for rendering (derived from VIEW_DISTANCE_SEC). */
 const MAX_RENDER_Z = 5.4 + VIEW_DISTANCE_SEC * 8.4;
-const JUMP_RISE_SEC = 0.22;
-const JUMP_HOLD_SEC = 0.16;
-const JUMP_FALL_SEC = 0.33;
+const JUMP_RISE_SEC = 0.18;
+const JUMP_HOLD_SEC = 0.08;
+const JUMP_FALL_SEC = 0.3;
 const JUMP_TOTAL_SEC = JUMP_RISE_SEC + JUMP_HOLD_SEC + JUMP_FALL_SEC;
 const JUMP_HEIGHT = 0.78;
+const SPEAKER_CLEARANCE_HEIGHT = 0.32;
+const SLIDE_CLEARANCE_HEIGHT = 0.68;
+const BANNER_CLEARANCE_HEIGHT = 0.72;
+const HAZARD_PASS_VISUAL_SEC = 0.3;
 
 const jumpOffsetAt = (age: number) => {
   if (age <= 0 || age >= JUMP_TOTAL_SEC) return 0;
@@ -224,6 +229,7 @@ const DEFAULT_PROGRESS: SavedProgress = {
 
 function makeRuntimeState() {
   return Object.assign(createInitialGameState(), {
+    passedHazardIds: new Set<string>(),
     pickupParticles: [] as PickupParticle[],
     pickupTexts: [] as PickupText[],
     pendingPickups: [] as PendingPickup[],
@@ -2242,10 +2248,10 @@ export default function ConcertRushGame() {
       previousTime: number,
     ) => {
       const run = runRef.current;
-      const jumping =
-        time - run.jumpStart > 0 &&
-        time - run.jumpStart < JUMP_TOTAL_SEC;
+      const jumpAge = time - run.jumpStart;
+      const jumpClearance = jumpOffsetAt(jumpAge);
       const sliding = run.slideUntil > time;
+      const slideClearance = sliding ? SLIDE_CLEARANCE_HEIGHT : 1.05;
 
       for (const item of run.activeItems) {
         if (run.removedItemIds.has(item.id)) continue;
@@ -2307,6 +2313,12 @@ export default function ConcertRushGame() {
         }
 
         const delta = item.time - time;
+        if (run.passedHazardIds.has(item.id)) {
+          if (delta < -HAZARD_PASS_VISUAL_SEC) {
+            run.removedItemIds.add(item.id);
+          }
+          continue;
+        }
         const requiredAction = item.requiredAction;
         const hasPendingPickupBeforeHazard = run.activeItems.some(
           (candidate) =>
@@ -2337,7 +2349,7 @@ export default function ConcertRushGame() {
           tutorialShownActionsRef.current.size < TUTORIAL_ACTION_COUNT &&
           Math.abs(delta) < 0.1
         ) {
-          run.removedItemIds.add(item.id);
+          run.passedHazardIds.add(item.id);
           continue;
         }
         if (
@@ -2345,10 +2357,12 @@ export default function ConcertRushGame() {
           Math.abs(delta) < 0.1
         ) {
           const dodged =
-            (item.type === "speaker" && jumping) ||
-            (item.type === "banner" && sliding);
+            (item.type === "speaker" &&
+              jumpClearance >= SPEAKER_CLEARANCE_HEIGHT) ||
+            (item.type === "banner" &&
+              slideClearance <= BANNER_CLEARANCE_HEIGHT);
           if (dodged) {
-            run.removedItemIds.add(item.id);
+            run.passedHazardIds.add(item.id);
             run.score += 90 * run.multiplier;
           } else {
             const resolved = resolveCollision(run, time);
@@ -3088,7 +3102,7 @@ export default function ConcertRushGame() {
         : isCrashed
           ? 0.9
         : sliding
-          ? 0.72
+          ? 0.68
           : 1;
       const playerHeight =
         scale * 1.05 * VIEW_TUNING.playerScale * poseHeightScale;
@@ -3140,7 +3154,10 @@ export default function ConcertRushGame() {
         ) => {
           context.save();
           context.globalAlpha = alpha;
-          context.translate(x, feet.y - bodyBounce);
+          context.translate(
+            x,
+            feet.y - bodyBounce + (sliding ? playerHeight * 0.055 : 0),
+          );
           context.rotate(laneTilt + actionTilt);
           context.scale(flip * extraScale, extraScale);
           context.drawImage(
@@ -3244,6 +3261,46 @@ export default function ConcertRushGame() {
         context.stroke();
         context.restore();
       }
+
+      // A successfully cleared obstacle keeps travelling toward the camera.
+      // Once it crosses the player's depth, draw it again as foreground so
+      // the speaker visibly passes under the jump and the banner passes in
+      // front of the sliding character instead of disappearing on contact.
+      renderItems
+        .filter(
+          (item) =>
+            item.kind === "hazard" &&
+            run.passedHazardIds.has(item.id) &&
+            item.z < VIEW_TUNING.playerDepth,
+        )
+        .sort((a, b) => b.z - a.z)
+        .forEach((item) => {
+          context.save();
+          if (item.type === "banner") {
+            drawSprite(
+              sprites.banner,
+              width,
+              height,
+              worldLane(item.lane),
+              item.z,
+              1.46 * VIEW_TUNING.bannerWidth * VIEW_TUNING.obstacleScale,
+              1.55 * VIEW_TUNING.obstacleScale,
+              -0.055,
+            );
+          } else if (item.type === "speaker") {
+            drawSprite(
+              sprites.speaker,
+              width,
+              height,
+              worldLane(item.lane),
+              item.z,
+              1.38 * VIEW_TUNING.obstacleScale,
+              0.82 * VIEW_TUNING.obstacleScale,
+              -0.055,
+            );
+          }
+          context.restore();
+        });
 
       if (run.pickupGlow > 0) {
         const glowRadius =
