@@ -192,10 +192,13 @@ test("generated grid times are musical while hit times use real onsets", () => {
 });
 
 test("song selection exposes a denser hard chart for the added track", () => {
-  assert.equal(TRACKS.length, 2);
+  assert.equal(TRACKS.length, 5);
+  assert.equal(getTrackConfig("how-sweet").difficultyLabel, "简单");
+  assert.equal(getTrackConfig("lemonade").difficultyLabel, "简单");
+  assert.equal(getTrackConfig("tick-tack").difficultyLabel, "中等");
   const normal = getTrackConfig("run-to-you");
   const hard = getTrackConfig("super-shy");
-  assert.equal(normal.difficultyLabel, "普通");
+  assert.equal(normal.difficultyLabel, "中等");
   assert.equal(hard.difficultyLabel, "困难");
   assert.match(hard.audioSrc, /obj_wo3DlMOG/);
   assert.equal(GENERATED_HARD_TRACK_META.trackId, hard.id);

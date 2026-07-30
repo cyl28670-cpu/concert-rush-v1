@@ -14,13 +14,64 @@ const SHARED_TRACK_CONFIG = Object.freeze({
 export const TRACKS = Object.freeze([
   Object.freeze({
     ...SHARED_TRACK_CONFIG,
+    id: "how-sweet",
+    title: "How sweet",
+    artist: "",
+    audioSrc: "/assets/How%20sweet.mp3",
+    bpm: 125,
+    difficulty: "easy",
+    difficultyLabel: "简单",
+    resultCopy: Object.freeze({
+      failureTitle: "赶路失败",
+      failureMessage: "途中撞到障碍，赶不上开场了",
+      shortageTitle: "没赶上",
+      shortageMessage: "门票不足 10 张，没能赶上演出",
+      successTitle: "抵达现场！",
+    }),
+  }),
+  Object.freeze({
+    ...SHARED_TRACK_CONFIG,
+    id: "lemonade",
+    title: "Lemonade",
+    artist: "",
+    audioSrc: "/assets/Lemonade.mp3",
+    bpm: 132,
+    difficulty: "easy",
+    difficultyLabel: "简单",
+    resultCopy: Object.freeze({
+      failureTitle: "赶路失败",
+      failureMessage: "途中撞到障碍，赶不上开场了",
+      shortageTitle: "没赶上",
+      shortageMessage: "门票不足 10 张，没能赶上演出",
+      successTitle: "抵达现场！",
+    }),
+  }),
+  Object.freeze({
+    ...SHARED_TRACK_CONFIG,
+    id: "tick-tack",
+    title: "tick-tack",
+    artist: "",
+    audioSrc: "/assets/tick-tack.mp3",
+    bpm: 128,
+    difficulty: "medium",
+    difficultyLabel: "中等",
+    resultCopy: Object.freeze({
+      failureTitle: "赶路失败",
+      failureMessage: "途中撞到障碍，赶不上开场了",
+      shortageTitle: "没赶上",
+      shortageMessage: "门票不足 10 张，没能赶上演出",
+      successTitle: "抵达现场！",
+    }),
+  }),
+  Object.freeze({
+    ...SHARED_TRACK_CONFIG,
     id: "run-to-you",
     title: "RUN TO YOU",
     artist: "AHOF",
     audioSrc: "/AHOF%20-%20RUN%20TO%20YOU.mp3",
     bpm: 128,
-    difficulty: "normal",
-    difficultyLabel: "普通",
+    difficulty: "medium",
+    difficultyLabel: "中等",
     resultCopy: Object.freeze({
       failureTitle: "赶路失败",
       failureMessage: "途中撞到障碍，赶不上开场了",
@@ -49,7 +100,9 @@ export const TRACKS = Object.freeze([
   }),
 ]);
 
-export const TRACK_CONFIG = TRACKS[0];
+export const TRACK_CONFIG = TRACKS.find(
+  (track) => track.id === "run-to-you",
+) ?? TRACKS[0];
 
 export function getTrackConfig(trackId) {
   return TRACKS.find((track) => track.id === trackId) ?? TRACK_CONFIG;

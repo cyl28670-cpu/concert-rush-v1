@@ -1283,6 +1283,21 @@ button {
 .home-track-options {
   display: grid;
   gap: 3px;
+  max-height: 116px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-width: thin;
+  scrollbar-color: #ff9fce88 transparent;
+  touch-action: pan-y;
+}
+
+.home-track-options::-webkit-scrollbar {
+  width: 3px;
+}
+
+.home-track-options::-webkit-scrollbar-thumb {
+  border-radius: 99px;
+  background: #ff9fce88;
 }
 
 .home-track-options button {
@@ -1397,6 +1412,23 @@ button {
 .home-start-cta:active {
   transform: translateY(4px);
   box-shadow: 0 3px 0 #49215f;
+}
+
+.home-headphone-tip {
+  position: absolute;
+  z-index: 5;
+  left: 8%;
+  bottom: 4.7%;
+  width: 50%;
+  margin: 0;
+  color: #f6dce9;
+  font-size: clamp(8px, 2.3vw, 10px);
+  font-weight: 900;
+  line-height: 1;
+  text-align: center;
+  white-space: nowrap;
+  text-shadow: 0 1px 2px #321342aa;
+  pointer-events: none;
 }
 
 .home-rules-link {

@@ -122,7 +122,9 @@ const VIEW_DISTANCE_SEC = 6.5;
 /** Max Z-depth for rendering (derived from VIEW_DISTANCE_SEC). */
 const MAX_RENDER_Z = 5.4 + VIEW_DISTANCE_SEC * 8.4;
 
-const DEFAULT_EVENTS = makeTrackEvents(TRACK_CONFIG);
+const DEFAULT_SELECTED_TRACK =
+  TRACKS.find((track) => track.id === "lemonade") ?? TRACK_CONFIG;
+const DEFAULT_EVENTS = makeTrackEvents(DEFAULT_SELECTED_TRACK);
 const ASSET = ASSET_BASE_URL;
 const TICKET_SPRITE = RUN_IMAGE_FILES.ticket;
 const LIGHTSTICK_SPRITE = RUN_IMAGE_FILES.lightstick;
@@ -222,6 +224,11 @@ function HomeScreen({
   onRules: () => void;
   onToggleMute: () => void;
 }) {
+  const orderedTracks = [
+    ...tracks.filter((track) => track.id === DEFAULT_SELECTED_TRACK.id),
+    ...tracks.filter((track) => track.id !== DEFAULT_SELECTED_TRACK.id),
+  ];
+
   return (
     <section className="home-screen home-redesign" data-testid="home-screen">
       <div className="home-atmosphere" aria-hidden="true" />
@@ -247,7 +254,7 @@ function HomeScreen({
       <section className="home-song-list">
         <h2>歌曲列表</h2>
         <div className="home-track-options" role="radiogroup" aria-label="选择歌曲">
-          {tracks.map((track) => {
+          {orderedTracks.map((track) => {
             const selected = track.id === selectedTrack.id;
             return (
               <button
@@ -260,13 +267,12 @@ function HomeScreen({
               >
                 <span>
                   <b>{track.title}</b>
-                  <small>{track.artist}</small>
+                  {track.artist && <small>{track.artist}</small>}
                 </span>
                 <em>{track.difficultyLabel}</em>
               </button>
             );
           })}
-          <p>更多歌曲敬请期待…</p>
         </div>
       </section>
 
@@ -279,6 +285,7 @@ function HomeScreen({
       <button className="home-start-cta" onClick={onStart}>
         开始游戏
       </button>
+      <p className="home-headphone-tip">&lt;建议佩戴耳机体验&gt;</p>
       <button className="home-rules-link" onClick={onRules}>
         玩法规则
       </button>
@@ -936,7 +943,7 @@ export default function ConcertRushGame() {
   const audioManagerRef = useRef<AudioManager>(new AudioManager());
   const spritesRef = useRef<SpriteMap>({});
   const runRef = useRef<GameRuntime>(makeRuntimeState());
-  const selectedTrackRef = useRef<TrackConfig>(TRACK_CONFIG);
+  const selectedTrackRef = useRef<TrackConfig>(DEFAULT_SELECTED_TRACK);
   const eventsRef = useRef(DEFAULT_EVENTS);
   const tutorialShownActionsRef = useRef<Set<Action>>(new Set());
   const tutorialActionRef = useRef<Action | null>(null);
@@ -950,7 +957,9 @@ export default function ConcertRushGame() {
   const [showRules, setShowRules] = useState(false);
   const [toast, setToast] = useState<string | null>(null);
   const [success, setSuccess] = useState(false);
-  const [selectedTrackId, setSelectedTrackId] = useState(TRACK_CONFIG.id);
+  const [selectedTrackId, setSelectedTrackId] = useState(
+    DEFAULT_SELECTED_TRACK.id,
+  );
   const [progress, setProgress] =
     useState<SavedProgress>(DEFAULT_PROGRESS);
   const [ui, setUi] = useState<UiSnapshot>(() => initialUi());
