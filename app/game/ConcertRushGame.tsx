@@ -41,11 +41,13 @@ type Screen =
   | "result";
 type Action = "left" | "right" | "jump" | "slide";
 const TUTORIAL_ACTION_COUNT = 4;
+const TUTORIAL_ACTIONS: readonly Action[] = ["left", "right", "jump", "slide"];
 type TrackConfig = (typeof TRACKS)[number];
 
 type SavedProgress = {
   bestTickets: number;
   rulesRead: boolean;
+  tutorialCompleted: boolean;
   muted: boolean;
 };
 
@@ -143,6 +145,7 @@ const ROAD_VANISHING_C =
 const DEFAULT_PROGRESS: SavedProgress = {
   bestTickets: 0,
   rulesRead: false,
+  tutorialCompleted: false,
   muted: false,
 };
 
@@ -1113,7 +1116,9 @@ export default function ConcertRushGame() {
         });
     }
     runRef.current = makeRuntimeState();
-    tutorialShownActionsRef.current = new Set();
+    tutorialShownActionsRef.current = savedRef.current.tutorialCompleted
+      ? new Set(TUTORIAL_ACTIONS)
+      : new Set();
     tutorialActionRef.current = null;
     runRef.current.difficulty = 1;
     runRef.current.recentJudgements = [];
@@ -1308,6 +1313,15 @@ export default function ConcertRushGame() {
           run.slideUntil = 0;
         }
         if (action === "slide") run.slideUntil = time + 0.62;
+        if (
+          tutorialShownActionsRef.current.size >= TUTORIAL_ACTION_COUNT &&
+          !savedRef.current.tutorialCompleted
+        ) {
+          const next = { ...savedRef.current, tutorialCompleted: true };
+          savedRef.current = next;
+          setProgress(next);
+          persistProgress(next);
+        }
         tutorialActionRef.current = null;
         runRef.current.mode = "playing";
         void audioManagerRef.current.resume();
