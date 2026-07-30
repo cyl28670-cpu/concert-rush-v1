@@ -8,6 +8,54 @@ const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
 const PROJECT_DIR = resolve(SCRIPT_DIR, "..");
 
 const TRACK_PRESETS = {
+  "how-sweet": {
+    source: "public/assets/How sweet.mp3",
+    output: "app/game/generated-track-events-how-sweet.js",
+    bpm: 125,
+    bpmSearchRadius: 3,
+    durationSec: 45,
+    hazardStrengthPercentile: 0.36,
+    collectibleStrengthPercentile: 0.12,
+    strongHazardGapBeats: 0.95,
+    normalHazardGapBeats: 1.45,
+    collectibleGapBeats: 0.48,
+    minHazardHitGapSec: 0.42,
+    minCollectibleHitGapSec: 0.14,
+    powerupIntervalSec: 7.5,
+    targetCollectibleCount: 47,
+  },
+  lemonade: {
+    source: "public/assets/Lemonade.mp3",
+    output: "app/game/generated-track-events-lemonade.js",
+    bpm: 132,
+    bpmSearchRadius: 3,
+    durationSec: 45,
+    hazardStrengthPercentile: 0.36,
+    collectibleStrengthPercentile: 0.12,
+    strongHazardGapBeats: 0.95,
+    normalHazardGapBeats: 1.45,
+    collectibleGapBeats: 0.48,
+    minHazardHitGapSec: 0.42,
+    minCollectibleHitGapSec: 0.14,
+    powerupIntervalSec: 7.5,
+    targetCollectibleCount: 49,
+  },
+  "tick-tack": {
+    source: "public/assets/tick-tack.mp3",
+    output: "app/game/generated-track-events-tick-tack.js",
+    bpm: 128,
+    bpmSearchRadius: 3,
+    durationSec: 45,
+    hazardStrengthPercentile: 0.36,
+    collectibleStrengthPercentile: 0.12,
+    strongHazardGapBeats: 0.95,
+    normalHazardGapBeats: 1.45,
+    collectibleGapBeats: 0.48,
+    minHazardHitGapSec: 0.42,
+    minCollectibleHitGapSec: 0.14,
+    powerupIntervalSec: 7.5,
+    targetCollectibleCount: 49,
+  },
   "run-to-you": {
     source: "public/AHOF - RUN TO YOU.mp3",
     output: "app/game/generated-track-events.js",
@@ -476,16 +524,33 @@ function createChart(peaks, grid) {
     hazardIndex += 1;
   }
 
+  const availableRewardSlots = rewardSlots.filter(
+    (slot) =>
+      !events.some(
+        (event) =>
+          Math.abs((event.gridTime ?? event.time) - slot.time) <
+          grid.beat * 0.45,
+      ),
+  );
+  const targetCollectibleCount =
+    TRACK_PRESET.targetCollectibleCount ?? availableRewardSlots.length;
+  const selectedRewardSlots =
+    availableRewardSlots.length <= targetCollectibleCount
+      ? availableRewardSlots
+      : Array.from({ length: targetCollectibleCount }, (_, index) => {
+          const position =
+            targetCollectibleCount === 1
+              ? 0
+              : Math.round(
+                  (index * (availableRewardSlots.length - 1)) /
+                    (targetCollectibleCount - 1),
+                );
+          return availableRewardSlots[position];
+        });
+
   let rewardIndex = 0;
   let lastPowerupTime = -10;
-  for (const slot of rewardSlots) {
-    const nearbyHazard = events.some(
-      (event) =>
-        Math.abs((event.gridTime ?? event.time) - slot.time) <
-        grid.beat * 0.45,
-    );
-    if (nearbyHazard) continue;
-
+  for (const slot of selectedRewardSlots) {
     let type = "ticket";
     if (
       slot.time - lastPowerupTime >= POWERUP_INTERVAL_SEC &&

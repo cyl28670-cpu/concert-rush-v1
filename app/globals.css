@@ -61,6 +61,7 @@ button {
   isolation: isolate;
 }
 
+
 .game-shell img {
   image-rendering: pixelated;
 }
@@ -1042,8 +1043,8 @@ button {
 }
 
 .milestone-bar {
+  position: relative;
   height: 12px;
-  display: flex;
   margin-top: 7px;
   overflow: hidden;
   border: 1.5px solid var(--ink);
@@ -1052,17 +1053,18 @@ button {
 }
 
 .milestone-bar > span {
-  min-width: 0;
-  flex-basis: 0;
-  border-right: 1px solid #6a82a4;
-  background: #eef5ff;
+  position: absolute;
+  z-index: 2;
+  top: 0;
+  bottom: 0;
+  width: 1px;
+  background: #6a82a4;
+  transform: translateX(-50%);
 }
 
-.milestone-bar > span:last-child {
-  border-right: 0;
-}
-
-.milestone-bar i {
+.milestone-bar > i {
+  position: absolute;
+  inset: 0 auto 0 0;
   display: block;
   height: 100%;
   background: #ed6fa8;
@@ -1074,13 +1076,18 @@ button {
 }
 
 .milestone-labels {
-  display: grid;
-  grid-template-columns: repeat(4, 1fr);
-  gap: 2px;
+  position: relative;
+  height: 31px;
   margin-top: 5px;
 }
 
-.milestone-labels span,
+.milestone-labels span {
+  position: absolute;
+  top: 0;
+  min-width: 54px;
+  transform: translateX(-50%);
+}
+
 .milestone-labels b,
 .milestone-labels small {
   display: block;
@@ -1096,6 +1103,7 @@ button {
   color: #617ca4;
   font-size: 10px;
   font-weight: 900;
+  white-space: nowrap;
 }
 
 .result-actions {
@@ -1283,21 +1291,6 @@ button {
 .home-track-options {
   display: grid;
   gap: 3px;
-  max-height: 116px;
-  overflow-y: auto;
-  overscroll-behavior: contain;
-  scrollbar-width: thin;
-  scrollbar-color: #ff9fce88 transparent;
-  touch-action: pan-y;
-}
-
-.home-track-options::-webkit-scrollbar {
-  width: 3px;
-}
-
-.home-track-options::-webkit-scrollbar-thumb {
-  border-radius: 99px;
-  background: #ff9fce88;
 }
 
 .home-track-options button {
@@ -1599,6 +1592,111 @@ button {
   border-color: #dbb3e8;
   background: #f9f1ffed;
   text-align: left;
+}
+
+.virtual-ticket {
+  position: relative;
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 2px 10px;
+  margin-top: 10px;
+  padding: 8px 11px;
+  overflow: hidden;
+  border: 2px dashed #d8a4c8;
+  border-radius: 7px;
+  background: linear-gradient(110deg, #fff7fb, #f2dce9);
+  color: #56334f;
+  text-align: left;
+}
+
+.virtual-ticket::after {
+  position: absolute;
+  top: -18px;
+  right: 12px;
+  width: 58px;
+  height: 58px;
+  border: 7px solid #d793bd66;
+  border-radius: 50%;
+  content: "";
+}
+
+.virtual-ticket small,
+.virtual-ticket span {
+  position: relative;
+  z-index: 1;
+  font-size: 9px;
+  font-weight: 900;
+}
+
+.virtual-ticket b {
+  position: relative;
+  z-index: 1;
+  color: #a14e7f;
+  font-size: 17px;
+}
+
+.virtual-ticket span {
+  grid-column: 1 / -1;
+  color: #77566d;
+}
+
+.virtual-ticket.stands {
+  border-color: #9f94df;
+  background: linear-gradient(110deg, #f5f0ff, #ded9f4);
+}
+
+.virtual-ticket.stands b {
+  color: #62549b;
+}
+
+.virtual-ticket.floor {
+  border-color: #e2ac74;
+  background: linear-gradient(110deg, #fff8e6, #f6deb6);
+}
+
+.virtual-ticket.floor b {
+  color: #ab6a32;
+}
+
+.virtual-ticket.front-row {
+  border-color: #f0cb68;
+  background: linear-gradient(110deg, #fffbe8, #f8df91);
+  box-shadow: 0 0 13px #ffd96e88;
+}
+
+.virtual-ticket.front-row b {
+  color: #a26c09;
+}
+
+.tier-unlocks {
+  margin-top: 8px;
+  padding: 7px 9px;
+  border-left: 3px solid #f0c55e;
+  background: #fff7dc;
+  color: #694e5f;
+  text-align: left;
+}
+
+.tier-unlocks > b {
+  display: block;
+  margin-bottom: 4px;
+  color: #a66a23;
+  font-size: 10px;
+}
+
+.tier-unlocks > div {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.tier-unlocks span {
+  padding: 3px 5px;
+  border-radius: 3px;
+  background: #fff;
+  color: #7b526a;
+  font-size: 8px;
+  font-weight: 900;
 }
 
 .result-panel .result-actions {

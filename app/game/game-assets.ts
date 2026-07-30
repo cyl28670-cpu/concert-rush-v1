@@ -14,22 +14,22 @@ export const RUN_IMAGE_FILES = Object.freeze({
   playerRun2: "player-run-cycle-2-v4.png",
   playerRun3: "player-run-cycle-3-v4.png",
   playerRun4: "player-run-cycle-4-v4.png",
-  playerJump: "player-3d-jump-v3.png",
-  playerSlide: "player-slide-seated-v5.png",
-  playerStumble: "player-3d-stumble-v4.png",
-  playerFallen: "player-3d-fallen-v3.png",
-  ticket: "collectible-ticket-neon-3d-v3.png",
-  lightstick: "collectible-lightstick-star-3d-v3.png",
+  playerJump: "player-jump-runstyle-v6.png",
+  playerSlide: "player-slide-user-v7.png",
+  playerStumble: "player-stumble-runstyle-v6.png",
+  playerFallen: "player-fallen-runstyle-v6.png",
+  ticket: "collectible-ticket-blue-v4.png",
+  lightstick: "collectible-lightstick-blue-v4.png",
   roadblock: "obstacle-microphone-3d-v3.png",
   speaker: "obstacle-speaker-cases-3d-v3.png",
-  banner: "obstacle-truss-banner-3d-v3.png",
+  banner: "obstacle-truss-banner-v4.png",
 });
 
 export const ASSET_BASE_URL = "/assets/";
 
 // Bump when replacing image files so browsers reload them instead of reusing a
 // cached copy (canvas Image() loads are otherwise served from the memory cache).
-export const ASSET_VERSION = "12";
+export const ASSET_VERSION = "16";
 
 export function assetUrl(file: string) {
   return `${ASSET_BASE_URL}${file}?v=${ASSET_VERSION}`;

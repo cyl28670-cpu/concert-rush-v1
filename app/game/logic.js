@@ -2,12 +2,28 @@ import { GENERATED_TRACK_EVENTS } from "./generated-track-events.js";
 import {
   GENERATED_TRACK_EVENTS as GENERATED_HARD_TRACK_EVENTS,
 } from "./generated-track-events-hard.js";
+import {
+  GENERATED_TRACK_EVENTS as GENERATED_HOW_SWEET_TRACK_EVENTS,
+} from "./generated-track-events-how-sweet.js";
+import {
+  GENERATED_TRACK_EVENTS as GENERATED_LEMONADE_TRACK_EVENTS,
+} from "./generated-track-events-lemonade.js";
+import {
+  GENERATED_TRACK_EVENTS as GENERATED_TICK_TACK_TRACK_EVENTS,
+} from "./generated-track-events-tick-tack.js";
+
+const GENERATED_TRACK_CHARTS = Object.freeze({
+  "how-sweet": GENERATED_HOW_SWEET_TRACK_EVENTS,
+  lemonade: GENERATED_LEMONADE_TRACK_EVENTS,
+  "tick-tack": GENERATED_TICK_TACK_TRACK_EVENTS,
+  "run-to-you": GENERATED_TRACK_EVENTS,
+  "super-shy": GENERATED_HARD_TRACK_EVENTS,
+});
 
 const SHARED_TRACK_CONFIG = Object.freeze({
   playbackStartSec: 0,
   durationSec: 45,
   finishDistance: 999,
-  ticketGoal: 100,
   city: "星耀之城",
 });
 
@@ -19,6 +35,7 @@ export const TRACKS = Object.freeze([
     artist: "",
     audioSrc: "/assets/How%20sweet.mp3",
     bpm: 125,
+    ticketGoal: 47,
     difficulty: "easy",
     difficultyLabel: "简单",
     resultCopy: Object.freeze({
@@ -36,6 +53,7 @@ export const TRACKS = Object.freeze([
     artist: "",
     audioSrc: "/assets/Lemonade.mp3",
     bpm: 132,
+    ticketGoal: 49,
     difficulty: "easy",
     difficultyLabel: "简单",
     resultCopy: Object.freeze({
@@ -53,6 +71,7 @@ export const TRACKS = Object.freeze([
     artist: "",
     audioSrc: "/assets/tick-tack.mp3",
     bpm: 128,
+    ticketGoal: 49,
     difficulty: "medium",
     difficultyLabel: "中等",
     resultCopy: Object.freeze({
@@ -70,6 +89,7 @@ export const TRACKS = Object.freeze([
     artist: "AHOF",
     audioSrc: "/AHOF%20-%20RUN%20TO%20YOU.mp3",
     bpm: 128,
+    ticketGoal: 96,
     difficulty: "medium",
     difficultyLabel: "中等",
     resultCopy: Object.freeze({
@@ -88,6 +108,7 @@ export const TRACKS = Object.freeze([
     audioSrc:
       "/assets/obj_wo3DlMOGwrbDjj7DisKw_55890904802_f2d4_d2bf_63b2_56ebb66815feb67c006bb6cc7015303f.mp3",
     bpm: 155,
+    ticketGoal: 103,
     difficulty: "hard",
     difficultyLabel: "困难",
     resultCopy: Object.freeze({
@@ -111,17 +132,37 @@ export function getTrackConfig(trackId) {
 // ─── Entry tiers — 抵达终点按门票碎片数量判定入场等级 ──────────────────────────
 // 撞到障碍物 = 赶路失败（不进入该表，直接失败）。
 export const ENTRY_TIERS = Object.freeze([
-  { min: 100, id: "front-row", emoji: "🌟", label: "第一排", seat: "舞台最近距离，最佳观演位置" },
-  { min: 50, id: "floor", emoji: "⭐", label: "内场", seat: "近距离观看演出" },
-  { min: 30, id: "stands", emoji: "🎫", label: "看台", seat: "成功进入观众看台" },
-  { min: 10, id: "admitted", emoji: "✓", label: "成功入场", seat: "赶上了演出" },
-  { min: 0, id: "missed", emoji: "!", label: "没赶上", seat: "门票少于 10 张" },
+  { ratio: 0.9, id: "front-row", emoji: "🌟", label: "VVIP 第一排", seat: "舞台最近距离，最佳观演位置" },
+  { ratio: 0.72, id: "floor", emoji: "⭐", label: "内场VIP", seat: "近距离观看演出" },
+  { ratio: 0.5, id: "stands", emoji: "🎫", label: "看台", seat: "成功进入观众看台" },
+  { ratio: 0.2, id: "admitted", emoji: "✓", label: "成功入场", seat: "赶上了演出" },
+  { ratio: 0, id: "missed", emoji: "🏔", label: "山顶票", seat: "获得山顶票入场资格" },
 ]);
 
-/** Given collected tickets, return the entry tier reached at the finish line. */
-export function computeEntryTier(tickets) {
+export function getEntryMilestones(ticketGoal = TRACK_CONFIG.ticketGoal) {
+  return ENTRY_TIERS
+    .filter((tier) => tier.ratio > 0)
+    .slice()
+    .reverse()
+    .map((tier) => ({
+      ...tier,
+      value: Math.max(1, Math.floor(ticketGoal * tier.ratio)),
+    }));
+}
+
+/** Given collected tickets, return the dynamic entry tier for this song. */
+export function computeEntryTier(
+  tickets,
+  ticketGoal = TRACK_CONFIG.ticketGoal,
+) {
   return (
-    ENTRY_TIERS.find((tier) => tickets >= tier.min) ??
+    ENTRY_TIERS.find(
+      (tier) =>
+        tickets >=
+        (tier.ratio === 0
+          ? 0
+          : Math.max(1, Math.floor(ticketGoal * tier.ratio))),
+    ) ??
     ENTRY_TIERS[ENTRY_TIERS.length - 1]
   );
 }
@@ -256,37 +297,24 @@ export function didCrossPickupTime(
   );
 }
 
-function applyTicketScoreValues(events, ticketGoal) {
-  const tickets = events
-    .flatMap((event) => event.items)
-    .filter((item) => item.kind === "collectible" && item.type === "ticket");
-
-  // Each chart can contain a different number of beat-synced tickets. Spread
-  // the 100-point total across them as whole-number values, so a perfect run
-  // always reaches exactly 100 without requiring exactly 100 sprites.
-  tickets.forEach((ticket, index) => {
-    ticket.ticketValue =
-      Math.floor(((index + 1) * ticketGoal) / tickets.length) -
-      Math.floor((index * ticketGoal) / tickets.length);
+function applyFixedTicketRules(events) {
+  events.flatMap((event) => event.items).forEach((item) => {
+    if (item.kind !== "collectible") return;
+    item.type = "ticket";
+    item.ticketValue = 1;
   });
-
   return events;
 }
 
 export function makeTrackEvents(config = TRACK_CONFIG) {
-  const generatedChart =
-    config.id === "super-shy"
-      ? GENERATED_HARD_TRACK_EVENTS
-      : config.id === "run-to-you"
-        ? GENERATED_TRACK_EVENTS
-        : null;
+  const generatedChart = GENERATED_TRACK_CHARTS[config.id] ?? null;
 
   if (generatedChart) {
     const events = generatedChart.map((event) => ({
       ...event,
       items: event.items.map((item) => ({ ...item })),
     }));
-    return applyTicketScoreValues(events, config.ticketGoal);
+    return applyFixedTicketRules(events);
   }
 
   const beat = 60 / config.bpm;
@@ -374,7 +402,7 @@ export function makeTrackEvents(config = TRACK_CONFIG) {
       ],
     };
   }).filter((event) => event.time < config.durationSec - 0.6);
-  return applyTicketScoreValues(events, config.ticketGoal);
+  return applyFixedTicketRules(events);
 }
 
 export function judgeAction(events, action, time, consumedIds = new Set()) {
@@ -522,13 +550,18 @@ export function generateSupplementEvents(state, time, spectrumBands) {
   };
 }
 
-export function collectItem(state, type, time, ticketValue = 1) {
+export function collectItem(
+  state,
+  type,
+  time,
+  ticketGoal = TRACK_CONFIG.ticketGoal,
+) {
   const next = { ...state };
 
   if (type === "ticket") {
     next.tickets = Math.min(
-      TRACK_CONFIG.ticketGoal,
-      state.tickets + ticketValue,
+      ticketGoal,
+      state.tickets + 1,
     );
     next.score += 120;
   } else if (type === "lightstick") {

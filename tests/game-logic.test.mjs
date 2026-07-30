@@ -14,6 +14,7 @@ import {
   didCrossPickupTime,
   distanceAtTime,
   generateSupplementEvents,
+  getEntryMilestones,
   getTrackConfig,
   isRunComplete,
   judgeAction,
@@ -32,6 +33,18 @@ import {
   GENERATED_TRACK_EVENTS as GENERATED_HARD_TRACK_EVENTS,
   GENERATED_TRACK_META as GENERATED_HARD_TRACK_META,
 } from "../app/game/generated-track-events-hard.js";
+import {
+  GENERATED_TRACK_EVENTS as GENERATED_HOW_SWEET_TRACK_EVENTS,
+  GENERATED_TRACK_META as GENERATED_HOW_SWEET_TRACK_META,
+} from "../app/game/generated-track-events-how-sweet.js";
+import {
+  GENERATED_TRACK_EVENTS as GENERATED_LEMONADE_TRACK_EVENTS,
+  GENERATED_TRACK_META as GENERATED_LEMONADE_TRACK_META,
+} from "../app/game/generated-track-events-lemonade.js";
+import {
+  GENERATED_TRACK_EVENTS as GENERATED_TICK_TACK_TRACK_EVENTS,
+  GENERATED_TRACK_META as GENERATED_TICK_TACK_TRACK_META,
+} from "../app/game/generated-track-events-tick-tack.js";
 
 const LWH_ITEM_TYPES = ["ticket", "lightstick"];
 
@@ -146,7 +159,13 @@ test("obstacles and collectibles share one deterministic audio chart", () => {
       ...event,
       items: event.items.map(({ ticketValue, ...item }) => item),
     })),
-    GENERATED_TRACK_EVENTS,
+    GENERATED_TRACK_EVENTS.map((event) => ({
+      ...event,
+      items: event.items.map((item) => ({
+        ...item,
+        type: item.kind === "collectible" ? "ticket" : item.type,
+      })),
+    })),
   );
   assert.equal(
     events.filter((event) =>
@@ -171,6 +190,9 @@ test("obstacles and collectibles share one deterministic audio chart", () => {
 
 test("generated grid times are musical while hit times use real onsets", () => {
   for (const [events, meta] of [
+    [GENERATED_HOW_SWEET_TRACK_EVENTS, GENERATED_HOW_SWEET_TRACK_META],
+    [GENERATED_LEMONADE_TRACK_EVENTS, GENERATED_LEMONADE_TRACK_META],
+    [GENERATED_TICK_TACK_TRACK_EVENTS, GENERATED_TICK_TACK_TRACK_META],
     [GENERATED_TRACK_EVENTS, GENERATED_TRACK_META],
     [GENERATED_HARD_TRACK_EVENTS, GENERATED_HARD_TRACK_META],
   ]) {
@@ -188,6 +210,24 @@ test("generated grid times are musical while hit times use real onsets", () => {
       assert.equal(event.items[0].hitTime, event.hitTime);
       assert.equal(event.items[0].gridTime, event.gridTime);
     }
+  }
+});
+
+test("every listed song uses its own generated audio chart", () => {
+  for (const [events, meta] of [
+    [GENERATED_HOW_SWEET_TRACK_EVENTS, GENERATED_HOW_SWEET_TRACK_META],
+    [GENERATED_LEMONADE_TRACK_EVENTS, GENERATED_LEMONADE_TRACK_META],
+    [GENERATED_TICK_TACK_TRACK_EVENTS, GENERATED_TICK_TACK_TRACK_META],
+    [GENERATED_TRACK_EVENTS, GENERATED_TRACK_META],
+    [GENERATED_HARD_TRACK_EVENTS, GENERATED_HARD_TRACK_META],
+  ]) {
+    const runtimeEvents = makeTrackEvents(getTrackConfig(meta.trackId));
+    assert.equal(runtimeEvents.length, events.length);
+    assert.equal(runtimeEvents[0].hitTime, events[0].hitTime);
+    assert.equal(
+      runtimeEvents[runtimeEvents.length - 1].hitTime,
+      events[events.length - 1].hitTime,
+    );
   }
 });
 
@@ -209,6 +249,24 @@ test("song selection exposes a denser hard chart for the added track", () => {
   assert.ok(
     makeTrackEvents(hard).length > makeTrackEvents(normal).length,
   );
+  assert.deepEqual(
+    Object.fromEntries(TRACKS.map((track) => [track.id, track.ticketGoal])),
+    {
+      "how-sweet": 47,
+      lemonade: 49,
+      "tick-tack": 49,
+      "run-to-you": 96,
+      "super-shy": 103,
+    },
+  );
+  for (const track of TRACKS) {
+    const collectibles = makeTrackEvents(track)
+      .flatMap((event) => event.items)
+      .filter((item) => item.kind === "collectible");
+    assert.equal(collectibles.length, track.ticketGoal);
+    assert.ok(collectibles.every((item) => item.type === "ticket"));
+    assert.ok(collectibles.every((item) => item.ticketValue === 1));
+  }
 });
 
 test("pickup timing can be late by one frame but can never trigger early", () => {
@@ -236,13 +294,13 @@ test("tickets are the score and the lightstick lasts five seconds", () => {
   assert.equal(state.lightstickUntil, 13);
 });
 
-test("ticket score caps at the 100-ticket goal", () => {
+test("ticket score caps at the selected song ticket goal", () => {
   const state = {
     ...createInitialGameState(),
-    tickets: 99,
+    tickets: 46,
     lightstickUntil: 10,
   };
-  assert.equal(collectItem(state, "ticket", 5).tickets, 100);
+  assert.equal(collectItem(state, "ticket", 5, 47).tickets, 47);
 });
 
 test("lightstick makes the player invincible until its timer expires", () => {
@@ -264,17 +322,19 @@ test("distance counts down from 999 metres over the 45-second audio clock", () =
   assert.equal(isRunComplete(TRACK_CONFIG.durationSec), true);
 });
 
-test("entry tier follows the 10 / 30 / 50 / 100 ticket milestones", () => {
-  assert.equal(computeEntryTier(0).id, "missed");
-  assert.equal(computeEntryTier(9).id, "missed");
-  assert.equal(computeEntryTier(10).id, "admitted");
-  assert.equal(computeEntryTier(29).id, "admitted");
-  assert.equal(computeEntryTier(30).id, "stands");
-  assert.equal(computeEntryTier(49).id, "stands");
-  assert.equal(computeEntryTier(50).id, "floor");
-  assert.equal(computeEntryTier(99).id, "floor");
-  assert.equal(computeEntryTier(100).id, "front-row");
-  assert.equal(computeEntryTier(120).id, "front-row");
+test("entry tier follows dynamic ticket milestones for each song", () => {
+  assert.deepEqual(
+    getEntryMilestones(53).map(({ value }) => value),
+    [10, 26, 38, 47],
+  );
+  assert.equal(computeEntryTier(9, 53).id, "missed");
+  assert.equal(computeEntryTier(10, 53).id, "admitted");
+  assert.equal(computeEntryTier(25, 53).id, "admitted");
+  assert.equal(computeEntryTier(26, 53).id, "stands");
+  assert.equal(computeEntryTier(37, 53).id, "stands");
+  assert.equal(computeEntryTier(38, 53).id, "floor");
+  assert.equal(computeEntryTier(46, 53).id, "floor");
+  assert.equal(computeEntryTier(47, 53).id, "front-row");
 });
 
 // ─── New tests: Dynamic Difficulty & Spectrum System ────────────────────────

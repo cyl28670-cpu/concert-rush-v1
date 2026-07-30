@@ -13,6 +13,7 @@ import {
   clampLane,
   collectItem,
   computeEntryTier,
+  getEntryMilestones,
   computeMultiplier,
   createInitialGameState,
   didCrossPickupTime,
@@ -30,6 +31,7 @@ import {
   RUN_IMAGE_FILES,
   assetUrl,
 } from "./game-assets";
+import { getScreenshotCapture } from "./screenshot-mode";
 import { VIEW_TUNING } from "./view-tuning";
 
 type Screen =
@@ -40,12 +42,13 @@ type Screen =
   | "paused"
   | "result";
 type Action = "left" | "right" | "jump" | "slide";
+type TierId = "missed" | "admitted" | "stands" | "floor" | "front-row";
 const TUTORIAL_ACTION_COUNT = 4;
 const TUTORIAL_ACTIONS: readonly Action[] = ["left", "right", "jump", "slide"];
 type TrackConfig = (typeof TRACKS)[number];
 
 type SavedProgress = {
-  bestTickets: number;
+  bestTierId: TierId;
   rulesRead: boolean;
   tutorialCompleted: boolean;
   muted: boolean;
@@ -123,6 +126,23 @@ const PICKUP_COLORS: Record<string, string> = {
 const VIEW_DISTANCE_SEC = 6.5;
 /** Max Z-depth for rendering (derived from VIEW_DISTANCE_SEC). */
 const MAX_RENDER_Z = 5.4 + VIEW_DISTANCE_SEC * 8.4;
+const JUMP_RISE_SEC = 0.22;
+const JUMP_HOLD_SEC = 0.16;
+const JUMP_FALL_SEC = 0.33;
+const JUMP_TOTAL_SEC = JUMP_RISE_SEC + JUMP_HOLD_SEC + JUMP_FALL_SEC;
+const JUMP_HEIGHT = 0.78;
+
+const jumpOffsetAt = (age: number) => {
+  if (age <= 0 || age >= JUMP_TOTAL_SEC) return 0;
+  if (age < JUMP_RISE_SEC) {
+    const progress = age / JUMP_RISE_SEC;
+    return Math.sin(progress * Math.PI * 0.5) * JUMP_HEIGHT;
+  }
+  if (age < JUMP_RISE_SEC + JUMP_HOLD_SEC) return JUMP_HEIGHT;
+  const fallProgress =
+    (age - JUMP_RISE_SEC - JUMP_HOLD_SEC) / JUMP_FALL_SEC;
+  return Math.cos(fallProgress * Math.PI * 0.5) * JUMP_HEIGHT;
+};
 
 const DEFAULT_SELECTED_TRACK =
   TRACKS.find((track) => track.id === "lemonade") ?? TRACK_CONFIG;
@@ -130,6 +150,59 @@ const DEFAULT_EVENTS = makeTrackEvents(DEFAULT_SELECTED_TRACK);
 const ASSET = ASSET_BASE_URL;
 const TICKET_SPRITE = RUN_IMAGE_FILES.ticket;
 const LIGHTSTICK_SPRITE = RUN_IMAGE_FILES.lightstick;
+const TIER_RANK: Record<TierId, number> = {
+  missed: 0,
+  admitted: 1,
+  stands: 2,
+  floor: 3,
+  "front-row": 4,
+};
+const TIER_LABEL: Record<TierId, string> = {
+  missed: "山顶票",
+  admitted: "成功入场",
+  stands: "看台",
+  floor: "内场VIP",
+  "front-row": "VVIP 第一排",
+};
+const TIER_PRESENTATION = {
+  missed: {
+    ticket: "赶场纪念票",
+    share: "继续冲向演唱会！",
+    unlocks: [],
+  },
+  admitted: {
+    ticket: "入场纪念票",
+    share: "我赶上演出了！",
+    unlocks: ["入场纪念票根"],
+  },
+  stands: {
+    ticket: "看台观演票",
+    share: "我已解锁看台观演位！",
+    unlocks: ["看台观演位"],
+  },
+  floor: {
+    ticket: "内场通行票",
+    share: "我已进入内场！",
+    unlocks: ["内场通道", "近舞台观演位"],
+  },
+  "front-row": {
+    ticket: "VVIP 第一排票",
+    share: "我解锁了 VVIP 第一排！",
+    unlocks: ["第一排舞台视角", "艺人彩蛋", "VVIP 分享海报"],
+  },
+} as const;
+
+function TierLabel({ tierId, label }: { tierId: string; label: string }) {
+  if (tierId !== "front-row") return label;
+
+  return (
+    <>
+      VVIP
+      <br />
+      第一排
+    </>
+  );
+}
 
 // ── Camera & Perspective Tunables ─────────────────────────────────────────
 /** Perspective focal factor derived from a real vertical field of view. */
@@ -143,7 +216,7 @@ const ROAD_VANISHING_C =
   VIEW_TUNING.roadVanishingRatio -
   VIEW_TUNING.cameraHeight * (FOCAL_FACTOR / 60);
 const DEFAULT_PROGRESS: SavedProgress = {
-  bestTickets: 0,
+  bestTierId: "missed",
   rulesRead: false,
   tutorialCompleted: false,
   muted: false,
@@ -186,7 +259,17 @@ function readProgress(): SavedProgress {
   if (typeof window === "undefined") return DEFAULT_PROGRESS;
   try {
     const stored = JSON.parse(localStorage.getItem(STORAGE_KEY) || "{}");
-    return { ...DEFAULT_PROGRESS, ...stored };
+    const bestTierId =
+      typeof stored.bestTierId === "string" &&
+      TIER_RANK[stored.bestTierId as TierId] !== undefined
+        ? stored.bestTierId as TierId
+        : "missed";
+    return {
+      bestTierId,
+      rulesRead: Boolean(stored.rulesRead),
+      tutorialCompleted: Boolean(stored.tutorialCompleted),
+      muted: Boolean(stored.muted),
+    };
   } catch {
     return DEFAULT_PROGRESS;
   }
@@ -296,7 +379,14 @@ function HomeScreen({
   );
 }
 
-function RulesModal({ onClose }: { onClose: () => void }) {
+function RulesModal({
+  onClose,
+  track,
+}: {
+  onClose: () => void;
+  track: TrackConfig;
+}) {
+  const milestones = getEntryMilestones(track.ticketGoal);
   return (
     <div className="overlay" role="dialog" aria-modal="true">
       <section className="rules-panel">
@@ -307,7 +397,7 @@ function RulesModal({ onClose }: { onClose: () => void }) {
         <div className="rule-list">
           <p>
             <img src={`${ASSET}${TICKET_SPRITE}`} alt="" />
-            <span><b>门票 = 得分</b>在歌曲结束前尽量收集 100 张。</span>
+            <span><b>门票 = 得分</b>本场共 {track.ticketGoal} 张，每张固定 1 分。</span>
           </p>
           <p>
             <img src={`${ASSET}${LIGHTSTICK_SPRITE}`} alt="" />
@@ -327,13 +417,14 @@ function RulesModal({ onClose }: { onClose: () => void }) {
           </p>
         </div>
         <div className="rule-tiers">
-          <p>抵达终点按门票数量解锁位置：</p>
+          <p>本场共 {track.ticketGoal} 张，抵达终点按门票数量解锁位置：</p>
           <ul>
-            <li>100 张：第一排</li>
-            <li>50–99 张：内场</li>
-            <li>30–49 张：看台</li>
-            <li>10–29 张：成功入场</li>
-            <li>不足 10 张：没赶上</li>
+            {milestones.slice().reverse().map((milestone) => (
+              <li key={milestone.id}>
+                {milestone.value} 张以上：{milestone.label}
+              </li>
+            ))}
+            <li>不足 {milestones[0].value} 张：没赶上</li>
           </ul>
           <p className="rule-tier-warn">途中撞到任意障碍物：赶路失败</p>
         </div>
@@ -440,14 +531,15 @@ function ResultModal({
   onHome: () => void;
   onShare: () => void;
 }) {
-  const tier = computeEntryTier(ui.tickets);
+  const tier = computeEntryTier(ui.tickets, track.ticketGoal);
+  const presentation =
+    TIER_PRESENTATION[tier.id as keyof typeof TIER_PRESENTATION];
   const reachedFinish = success;
-  const milestones = [
-    { start: 0, end: 10, value: 10, label: "入场" },
-    { start: 10, end: 30, value: 30, label: "看台" },
-    { start: 30, end: 50, value: 50, label: "内场" },
-    { start: 50, end: 100, value: 100, label: "第一排" },
-  ];
+  const milestones = getEntryMilestones(track.ticketGoal);
+  const ticketProgress = Math.max(
+    0,
+    Math.min(100, (ui.tickets / track.ticketGoal) * 100),
+  );
 
   return (
     <div className="overlay result-overlay" role="dialog" aria-modal="true">
@@ -457,41 +549,75 @@ function ResultModal({
             <h2>恭喜获得：<strong>{tier.label}</strong></h2>
             <div className="result-stats">
               <span><small>获得门票</small><b>{ui.tickets}</b></span>
-              <span><small>历史记录</small><b>{progress.bestTickets}</b></span>
+              <span>
+                <small>历史最佳</small>
+                <b>
+                  <TierLabel
+                    tierId={progress.bestTierId}
+                    label={TIER_LABEL[progress.bestTierId]}
+                  />
+                </b>
+              </span>
             </div>
+            <section
+              className={`virtual-ticket ${tier.id}`}
+              aria-label={`${tier.label} 虚拟票根`}
+            >
+              <small>{presentation.ticket}</small>
+              <b>{tier.label}</b>
+              <span>
+                {track.title} · {ui.tickets}/{track.ticketGoal} 张
+              </span>
+            </section>
+            {presentation.unlocks.length > 0 && (
+              <section className="tier-unlocks" aria-label="本场解锁">
+                <b>本场解锁</b>
+                <div>
+                  {presentation.unlocks.map((unlock) => (
+                    <span key={unlock}>{unlock}</span>
+                  ))}
+                </div>
+              </section>
+            )}
             <div className="milestone-card">
               <div className="milestone-summary">
                 <b>距离第一排还有</b>
                 <span>{ui.tickets} / {track.ticketGoal}</span>
               </div>
               <div className="milestone-bar" aria-label={`门票进度 ${ui.tickets} 张`}>
+                <i style={{ width: `${ticketProgress}%` }} />
                 {milestones.map((milestone) => {
-                  const fill = Math.max(
-                    0,
-                    Math.min(
-                      100,
-                      ((ui.tickets - milestone.start) /
-                        (milestone.end - milestone.start)) *
-                        100,
-                    ),
-                  );
                   return (
                     <span
                       key={milestone.value}
-                      style={{ flexGrow: milestone.end - milestone.start }}
-                    >
-                      <i style={{ width: `${fill}%` }} />
-                    </span>
+                      style={{
+                        left: `${(milestone.value / track.ticketGoal) * 100}%`,
+                      }}
+                    />
                   );
                 })}
               </div>
               <div className="milestone-labels">
-                {milestones.map((milestone) => (
-                  <span key={milestone.value}>
-                    <b>{milestone.value}</b>
-                    <small>{milestone.label}</small>
-                  </span>
-                ))}
+                {milestones.map((milestone) => {
+                  const label =
+                    milestone.id === "front-row"
+                      ? "第一排"
+                      : milestone.id === "floor"
+                        ? "内场VIP"
+                        : milestone.label;
+                  return (
+                    <span
+                      key={milestone.value}
+                      className={`milestone-${milestone.id}`}
+                      style={{
+                        left: `${(milestone.value / track.ticketGoal) * 100}%`,
+                      }}
+                    >
+                      <b>{milestone.value}</b>
+                      <small>{label}</small>
+                    </span>
+                  );
+                })}
               </div>
             </div>
           </>
@@ -500,7 +626,15 @@ function ResultModal({
             <h2>没赶上演唱会…</h2>
             <div className="result-stats failure-stats">
               <span><small>目前得分</small><b>{ui.tickets}</b></span>
-              <span><small>历史记录</small><b>{progress.bestTickets}</b></span>
+              <span>
+                <small>历史最佳</small>
+                <b>
+                  <TierLabel
+                    tierId={progress.bestTierId}
+                    label={TIER_LABEL[progress.bestTierId]}
+                  />
+                </b>
+              </span>
             </div>
           </>
         )}
@@ -969,6 +1103,42 @@ export default function ConcertRushGame() {
   const selectedTrack =
     TRACKS.find((track) => track.id === selectedTrackId) ?? TRACK_CONFIG;
 
+  // Screenshot-only result state. Its URL mapping lives in screenshot-mode.ts
+  // so normal gameplay remains independent from capture tooling.
+  useEffect(() => {
+    const capture = getScreenshotCapture(window.location.search);
+    if (!capture) return;
+    const { tickets } = capture;
+
+    runRef.current = {
+      ...makeRuntimeState(),
+      mode: "result",
+      // Match the real successful settlement flow so its original stage,
+      // runner, road and lighting remain unchanged.
+      success: true,
+      lastTrackTime: selectedTrack.durationSec,
+      tickets,
+      combo: 20,
+    };
+    screenRef.current = "result";
+    savedRef.current = { ...DEFAULT_PROGRESS, bestTierId: "front-row" };
+    setProgress(savedRef.current);
+    setSuccess(true);
+    const captureUi: UiSnapshot = {
+      distance: selectedTrack.finishDistance,
+      tickets,
+      combo: 20,
+      lightstick: 0,
+      judgement: null,
+    };
+    setUi(captureUi);
+    setScreenState("result");
+    // The canvas updates its HUD on its own animation frame. Keep the
+    // screenshot value stable until this temporary capture route is removed.
+    const interval = window.setInterval(() => setUi(captureUi), 40);
+    return () => window.clearInterval(interval);
+  }, [selectedTrack.durationSec, selectedTrack.finishDistance]);
+
   const setScreen = useCallback((next: Screen) => {
     screenRef.current = next;
     setScreenState(next);
@@ -1012,9 +1182,18 @@ export default function ConcertRushGame() {
       setScreen("result");
       pushUi(run.lastTrackTime);
 
+      const earnedTier = computeEntryTier(
+        run.tickets,
+        selectedTrackRef.current.ticketGoal,
+      );
+      const earnedTierId = earnedTier.id as TierId;
+      const bestTierId =
+        TIER_RANK[earnedTierId] > TIER_RANK[savedRef.current.bestTierId]
+          ? earnedTierId
+          : savedRef.current.bestTierId;
       const nextSaved: SavedProgress = {
         ...savedRef.current,
-        bestTickets: Math.max(savedRef.current.bestTickets, run.tickets),
+        bestTierId,
       };
       savedRef.current = nextSaved;
       setProgress(nextSaved);
@@ -1171,7 +1350,9 @@ export default function ConcertRushGame() {
     const width = snapshot.width;
     const height = snapshot.height;
     const scale = width / 375;
-    const tier = computeEntryTier(ui.tickets);
+    const tier = computeEntryTier(ui.tickets, selectedTrack.ticketGoal);
+    const presentation =
+      TIER_PRESENTATION[tier.id as keyof typeof TIER_PRESENTATION];
     const cardX = width * 0.08;
     const cardY = height * 0.265;
     const cardWidth = width * 0.84;
@@ -1204,11 +1385,18 @@ export default function ConcertRushGame() {
     shot.fillStyle = "#ffe48d";
     shot.font = `1000 ${34 * scale}px system-ui, sans-serif`;
     shot.fillText(tier.label, width / 2, cardY + 94 * scale);
+    shot.fillStyle = "#f7ddea";
+    shot.font = `800 ${12 * scale}px system-ui, sans-serif`;
+    shot.fillText(presentation.share, width / 2, cardY + 116 * scale);
 
-    const statY = cardY + 138 * scale;
+    const statY = cardY + 154 * scale;
     [
       { x: width * 0.33, label: "获得门票", value: ui.tickets },
-      { x: width * 0.67, label: "历史记录", value: progress.bestTickets },
+      {
+        x: width * 0.67,
+        label: "历史最佳",
+        value: TIER_LABEL[progress.bestTierId],
+      },
     ].forEach((stat) => {
       shot.fillStyle = "#dce7ff";
       shot.font = `800 ${12 * scale}px system-ui, sans-serif`;
@@ -1221,14 +1409,14 @@ export default function ConcertRushGame() {
     shot.fillStyle = "#f8f1ff";
     shot.fillRect(
       cardX + 20 * scale,
-      cardY + 194 * scale,
+      cardY + 210 * scale,
       cardWidth - 40 * scale,
       12 * scale,
     );
     shot.fillStyle = "#ef79b7";
     shot.fillRect(
       cardX + 20 * scale,
-      cardY + 194 * scale,
+      cardY + 210 * scale,
       (cardWidth - 40 * scale) *
         Math.min(1, ui.tickets / selectedTrack.ticketGoal),
       12 * scale,
@@ -1266,7 +1454,7 @@ export default function ConcertRushGame() {
       setToast("截图分享失败，请再试一次");
       window.setTimeout(() => setToast(null), 1800);
     }
-  }, [progress.bestTickets, selectedTrack.ticketGoal, ui.tickets]);
+  }, [progress.bestTierId, selectedTrack.ticketGoal, ui.tickets]);
 
   const closeRules = useCallback(() => {
     const next = { ...savedRef.current, rulesRead: true };
@@ -1361,11 +1549,11 @@ export default function ConcertRushGame() {
       if (run.lane !== previousLane) {
         audioManagerRef.current.setLanePan(run.lane);
       }
-      if (action === "jump" && time - run.jumpStart > 0.72) {
+      if (action === "jump" && time - run.jumpStart > JUMP_TOTAL_SEC) {
         run.jumpStart = time;
         run.slideUntil = 0;
       }
-      if (action === "slide" && time - run.jumpStart > 0.66) {
+      if (action === "slide" && time - run.jumpStart > JUMP_TOTAL_SEC) {
         run.slideUntil = time + 0.62;
       }
 
@@ -1410,18 +1598,26 @@ export default function ConcertRushGame() {
   );
 
   useEffect(() => {
+    // Capture routes use deterministic progress and must not be overwritten
+    // by an older value persisted in local storage. Image assets still need
+    // to load so the real settlement background is rendered.
+    const isCaptureRoute = Boolean(
+      getScreenshotCapture(window.location.search),
+    );
     let cancelled = false;
-    const stored = readProgress();
-    savedRef.current = stored;
-    audioManagerRef.current.setMuted(stored.muted);
-    audioManagerRef.current.setLanePan(0);
-    runRef.current = makeRuntimeState();
-    playHomeMusic();
-    queueMicrotask(() => {
-      if (cancelled) return;
-      setProgress(stored);
-      setUi(initialUi());
-    });
+    if (!isCaptureRoute) {
+      const stored = readProgress();
+      savedRef.current = stored;
+      audioManagerRef.current.setMuted(stored.muted);
+      audioManagerRef.current.setLanePan(0);
+      runRef.current = makeRuntimeState();
+      playHomeMusic();
+      queueMicrotask(() => {
+        if (cancelled) return;
+        setProgress(stored);
+        setUi(initialUi());
+      });
+    }
 
     const sprites: SpriteMap = {};
     Object.entries(SPRITE_FILES).forEach(([key, file]) => {
@@ -2047,7 +2243,8 @@ export default function ConcertRushGame() {
     ) => {
       const run = runRef.current;
       const jumping =
-        time - run.jumpStart > 0 && time - run.jumpStart < 0.68;
+        time - run.jumpStart > 0 &&
+        time - run.jumpStart < JUMP_TOTAL_SEC;
       const sliding = run.slideUntil > time;
 
       for (const item of run.activeItems) {
@@ -2077,7 +2274,12 @@ export default function ConcertRushGame() {
                     : null;
             Object.assign(
               run,
-              collectItem(run, item.type, time, item.ticketValue),
+              collectItem(
+                run,
+                item.type,
+                time,
+                selectedTrackRef.current.ticketGoal,
+              ),
             );
             run.removedItemIds.add(item.id);
             audioManagerRef.current.playCollect(
@@ -2831,10 +3033,7 @@ export default function ConcertRushGame() {
         });
 
       const jumpAge = time - run.jumpStart;
-      const jump =
-        jumpAge > 0 && jumpAge < 0.68
-          ? Math.sin((jumpAge / 0.68) * Math.PI) * 0.78
-          : 0;
+      const jump = jumpOffsetAt(jumpAge);
       const sliding = run.slideUntil > time;
       const stepPhase = (time / beat) * Math.PI * 2;
       // Body stays steady while running; only the footstep dust conveys motion.
@@ -2887,7 +3086,7 @@ export default function ConcertRushGame() {
       const poseHeightScale = crashFallen
         ? 0.58
         : isCrashed
-          ? 0.83
+          ? 0.9
         : sliding
           ? 0.72
           : 1;
@@ -2921,12 +3120,10 @@ export default function ConcertRushGame() {
             ? crashFallen
               ? 0
               : 0.08 + crashProgress * 0.26
-            : jump > 0
-            ? Math.sin((jumpAge / 0.68) * Math.PI) * -0.08
             : sliding
               ? 0
               : 0;
-        const laneTilt = isCrashed || sliding
+        const laneTilt = isCrashed || sliding || jump > 0
           ? 0
           : Math.max(-0.2, Math.min(0.2, laneMotion * -0.38));
         // Never mirror the whole body; preserve a stable rear-facing run pose.
@@ -3297,7 +3494,9 @@ export default function ConcertRushGame() {
           />
         )}
 
-        {showRules && <RulesModal onClose={closeRules} />}
+        {showRules && (
+          <RulesModal onClose={closeRules} track={selectedTrack} />
+        )}
         {toast && <div className="toast">{toast}</div>}
       </section>
     </main>
