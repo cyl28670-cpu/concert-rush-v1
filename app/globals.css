@@ -258,6 +258,37 @@ button {
   color: #b62f5d;
 }
 
+.track-selection-hint {
+  min-height: 15px;
+  display: flex !important;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  margin: 0 3px !important;
+  color: #5e79a4;
+  line-height: 1.15;
+}
+
+.track-selection-hint b {
+  color: #dc4a8a;
+  font-size: 9px;
+}
+
+.track-selection-hint span {
+  color: #5e79a4;
+  font-size: 8px;
+  font-weight: 800;
+}
+
+.more-tracks {
+  margin: -2px 0 0 !important;
+  color: #8299bc;
+  font-size: 8px;
+  font-weight: 900;
+  letter-spacing: 0.08em;
+  text-align: center;
+}
+
 @keyframes selected-track-glow {
   from {
     filter: brightness(1);

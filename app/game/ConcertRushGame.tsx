@@ -34,6 +34,7 @@ type Screen =
   | "home"
   | "countdown"
   | "playing"
+  | "crashed"
   | "paused"
   | "result";
 type Action = "left" | "right" | "jump" | "slide";
@@ -62,6 +63,7 @@ type ActiveItem = {
   time: number;
   gridTime?: number;
   hitTime?: number;
+  requiredAction?: Action;
 };
 type BaseGameState = ReturnType<typeof createInitialGameState>;
 type PickupParticle = {
@@ -98,9 +100,12 @@ type GameRuntime = Omit<BaseGameState, "activeItems" | "judgement"> & {
   pickupFlash: number;
   pickupGlow: number;
   pickupShake: number;
+  crashStartedAtMs: number;
+  crashDuration: number;
 };
 
 const STORAGE_KEY = "concert-rush-v1-progress";
+const CRASH_DURATION_SEC = 1.5;
 const PICKUP_COLORS: Record<string, string> = {
   ticket: "#ff75bd",
   lightstick: "#61dcff",
@@ -158,6 +163,8 @@ function makeRuntimeState() {
     pickupFlash: 0,
     pickupGlow: 0,
     pickupShake: 0,
+    crashStartedAtMs: 0,
+    crashDuration: CRASH_DURATION_SEC,
   }) as GameRuntime;
 }
 
@@ -169,10 +176,13 @@ const SPRITE_FILES = {
   player: RUN_IMAGE_FILES.player,
   playerJump: RUN_IMAGE_FILES.playerJump,
   playerSlide: RUN_IMAGE_FILES.playerSlide,
+  playerStumble: RUN_IMAGE_FILES.playerStumble,
+  playerFallen: RUN_IMAGE_FILES.playerFallen,
   ticket: RUN_IMAGE_FILES.ticket,
   lightstick: RUN_IMAGE_FILES.lightstick,
   roadblock: RUN_IMAGE_FILES.roadblock,
   speaker: RUN_IMAGE_FILES.speaker,
+  banner: RUN_IMAGE_FILES.banner,
 };
 
 function readProgress(): SavedProgress {
@@ -283,6 +293,11 @@ function HomeScreen({
               </button>
             );
           })}
+          <p className="track-selection-hint" aria-live="polite">
+            <b>✓ 已选择：{selectedTrack.title}</b>
+            <span>点击歌曲卡片即可切换</span>
+          </p>
+          <p className="more-tracks">✦ 更多歌曲敬请期待 ✦</p>
         </div>
 
         <div className="home-scene" aria-hidden="true">
@@ -330,15 +345,15 @@ function RulesModal({ onClose }: { onClose: () => void }) {
             <span><b>应援棒 · 5 秒</b>开启保护罩，碰到障碍也不会失败。</span>
           </p>
           <p>
-            <img src={`${ASSET}obstacle_speaker.png`} alt="" />
+            <img src={assetUrl(RUN_IMAGE_FILES.speaker)} alt="" />
             <span><b>扁音响</b>横放地面，向上滑动跳过去。</span>
           </p>
           <p>
-            <img src={`${ASSET}obstacle_construction_sign.png`} alt="" />
+            <img src={assetUrl(RUN_IMAGE_FILES.roadblock)} alt="" />
             <span><b>指路牌</b>左右滑动，换道躲避。</span>
           </p>
           <p>
-            <span className="rule-banner-icon" aria-hidden="true">AHOF</span>
+            <img src={assetUrl(RUN_IMAGE_FILES.banner)} alt="" />
             <span><b>高横幅</b>竹竿撑起的横幅，向下滑铲从下面钻过。</span>
           </p>
         </div>
@@ -963,6 +978,24 @@ export default function ConcertRushGame() {
     pushUi(track.durationSec);
     commitResult(true);
   }, [commitResult, pushUi]);
+
+  const startCrash = useCallback(
+    (trackTime: number) => {
+      if (screenRef.current !== "playing") return;
+      const run = runRef.current;
+      audioRef.current?.pause();
+      run.mode = "crashed";
+      run.lastTrackTime = trackTime;
+      run.crashStartedAtMs = performance.now();
+      run.crashDuration = CRASH_DURATION_SEC;
+      setScreen("crashed");
+      pushUi(trackTime);
+      if ("vibrate" in navigator) {
+        navigator.vibrate([90, 35, 150]);
+      }
+    },
+    [pushUi, setScreen],
+  );
 
   const beginRun = useCallback(() => {
     const audio = audioRef.current;
@@ -1600,6 +1633,7 @@ export default function ConcertRushGame() {
       scale: number,
       action: Action,
       time: number,
+      urgent = false,
     ) => {
       const s = Math.max(6, scale * 0.26);
       const angle =
@@ -1634,14 +1668,105 @@ export default function ConcertRushGame() {
 
       // Draw fill + outline in screen space (stroke width independent of scale).
       context.save();
-      context.shadowColor = "rgba(150, 240, 150, 0.9)";
-      context.shadowBlur = s * 0.8;
-      context.fillStyle = "#a8f0a0";
+      context.shadowColor = urgent
+        ? "rgba(255, 115, 175, 0.98)"
+        : "rgba(150, 240, 150, 0.9)";
+      context.shadowBlur = s * (urgent ? 1.15 : 0.8);
+      context.fillStyle = urgent ? "#ffe25a" : "#a8f0a0";
       context.fill();
       context.shadowBlur = 0;
       context.lineJoin = "round";
       context.lineWidth = Math.max(1.2, s * 0.14);
-      context.strokeStyle = "#2f6b3a";
+      context.strokeStyle = urgent ? "#b52f68" : "#2f6b3a";
+      context.stroke();
+      context.restore();
+
+      const actionLabel: Record<Action, string> = {
+        left: "← 向左",
+        right: "向右 →",
+        jump: "↑ 跳跃",
+        slide: "↓ 下滑",
+      };
+      const label = actionLabel[action];
+      const fontSize = Math.max(9, Math.min(15, s * 0.52));
+      context.save();
+      context.font = `1000 ${fontSize}px system-ui, sans-serif`;
+      context.textAlign = "center";
+      context.textBaseline = "middle";
+      const labelWidth = context.measureText(label).width + fontSize * 1.05;
+      const labelHeight = fontSize * 1.55;
+      const labelY = cy - s * 1.65;
+      context.fillStyle = urgent
+        ? "rgba(181, 47, 104, 0.94)"
+        : "rgba(26, 65, 82, 0.86)";
+      context.beginPath();
+      context.roundRect(
+        cx - labelWidth / 2,
+        labelY - labelHeight / 2,
+        labelWidth,
+        labelHeight,
+        labelHeight / 2,
+      );
+      context.fill();
+      context.strokeStyle = urgent ? "#fff3ad" : "#dfffea";
+      context.lineWidth = 1.5;
+      context.stroke();
+      context.fillStyle = "#ffffff";
+      context.fillText(label, cx, labelY + 0.5);
+      context.restore();
+    };
+
+    const drawHazardTelegraph = (
+      width: number,
+      height: number,
+      worldX: number,
+      depth: number,
+      secondsUntilHit: number,
+      isPlayerLane: boolean,
+      time: number,
+    ) => {
+      if (secondsUntilHit > 2.5 || secondsUntilHit < -0.1) return;
+      const point = project(width, height, worldX, 0.015, depth);
+      const laneRadiusX = Math.max(8, point.scale * 0.72);
+      const laneRadiusY = Math.max(3, point.scale * 0.12);
+      const proximity = Math.max(
+        0,
+        Math.min(1, (2.5 - secondsUntilHit) / 2.35),
+      );
+      const pulse = 0.72 + Math.sin(time * 12) * 0.28;
+
+      context.save();
+      context.globalAlpha =
+        (0.16 + proximity * 0.36) *
+        (isPlayerLane ? 1 : 0.62);
+      context.fillStyle = isPlayerLane ? "#ff4f91" : "#62dff3";
+      context.shadowColor = isPlayerLane ? "#ff4f91" : "#62dff3";
+      context.shadowBlur = laneRadiusX * 0.22 * pulse;
+      context.beginPath();
+      context.ellipse(
+        point.x,
+        point.y - laneRadiusY * 0.15,
+        laneRadiusX * (0.9 + pulse * 0.1),
+        laneRadiusY,
+        0,
+        0,
+        Math.PI * 2,
+      );
+      context.fill();
+
+      context.globalAlpha = 0.65 + proximity * 0.3;
+      context.strokeStyle = isPlayerLane ? "#fff18b" : "#dffbff";
+      context.lineWidth = Math.max(1.5, point.scale * 0.025);
+      context.beginPath();
+      context.ellipse(
+        point.x,
+        point.y - laneRadiusY * 0.15,
+        laneRadiusX,
+        laneRadiusY,
+        0,
+        0,
+        Math.PI * 2,
+      );
       context.stroke();
       context.restore();
     };
@@ -1659,6 +1784,10 @@ export default function ConcertRushGame() {
             run.activeItems.push({
               ...item,
               kind: item.kind as ActiveItem["kind"],
+              requiredAction:
+                item.kind === "hazard"
+                  ? event.action as Action
+                  : undefined,
             });
           }
         }
@@ -1745,7 +1874,7 @@ export default function ConcertRushGame() {
             Object.assign(run, resolved.state);
             run.removedItemIds.add(item.id);
             if (resolved.failed) {
-              commitResult(false);
+              startCrash(time);
               return;
             }
           }
@@ -1760,6 +1889,13 @@ export default function ConcertRushGame() {
       const run = runRef.current;
       const audio = audioRef.current;
       const isPlaying = screenRef.current === "playing";
+      const isCrashed = screenRef.current === "crashed";
+      const crashElapsed = isCrashed
+        ? Math.max(0, (performance.now() - run.crashStartedAtMs) / 1000)
+        : 0;
+      const crashProgress = isCrashed
+        ? Math.min(1, crashElapsed / run.crashDuration)
+        : 0;
       const time =
         isPlaying && audio
           ? Math.max(
@@ -1902,14 +2038,20 @@ export default function ConcertRushGame() {
 
       const sprites = spritesRef.current;
       context.clearRect(0, 0, width, height);
+      const crashShake =
+        isCrashed && crashProgress < 0.62
+          ? (1 - crashProgress / 0.62) * 1.15
+          : 0;
       const shakeX =
-        run.pickupShake > 0
+        (run.pickupShake > 0
           ? (Math.random() - 0.5) * run.pickupShake * 14
-          : 0;
+          : 0) +
+        (Math.random() - 0.5) * crashShake * 22;
       const shakeY =
-        run.pickupShake > 0
+        (run.pickupShake > 0
           ? (Math.random() - 0.5) * run.pickupShake * 10
-          : 0;
+          : 0) +
+        (Math.random() - 0.5) * crashShake * 15;
       context.save();
       context.translate(shakeX, shakeY);
 
@@ -2172,10 +2314,10 @@ export default function ConcertRushGame() {
       //   指路牌（横向闪避阻断）  0.8–1.2  → ~0.9
       //   横幅、扁音响为特殊绘制，尺寸在各自分支里定义。
       const spriteSize: Record<string, [number, number]> = {
-        ticket: [0.34, 0.48],
-        lightstick: [0.78, 0.72],
-        roadblock: [0.82, 0.90],
-        speaker: [0.75, 0.55],
+        ticket: [0.52, 0.42],
+        lightstick: [0.5, 0.7],
+        roadblock: [0.68, 1.36],
+        speaker: [1.38, 0.82],
       };
 
       const renderItems = run.activeItems
@@ -2219,22 +2361,64 @@ export default function ConcertRushGame() {
 
           const drawLane = item.lane;
 
-          // First obstacle of each type gets a floating gesture arrow hint.
-          if (
-            item.kind === "hazard" &&
-            hazardHintsRef.current.has(item.id)
-          ) {
-            const hint = project(width, height, worldLane(drawLane), 2.0, item.z);
-            drawActionArrow(
-              hint.x,
-              hint.y,
-              hint.scale,
-              hazardHintsRef.current.get(item.id) as Action,
+          if (item.kind === "hazard") {
+            const secondsUntilHit = item.time - time;
+            const isPlayerLane = item.lane === run.lane;
+            drawHazardTelegraph(
+              width,
+              height,
+              worldLane(drawLane),
+              item.z,
+              secondsUntilHit,
+              isPlayerLane,
               time,
             );
+
+            const isTutorialHint = hazardHintsRef.current.has(item.id);
+            const showUrgentHint =
+              isPlayerLane &&
+              secondsUntilHit > 0.18 &&
+              secondsUntilHit < 2.05;
+            const requiredAction =
+              item.requiredAction ??
+              hazardHintsRef.current.get(item.id);
+            if (requiredAction && (isTutorialHint || showUrgentHint)) {
+              const hint = project(
+                width,
+                height,
+                worldLane(drawLane),
+                item.type === "speaker" ? 1.35 : 2.0,
+                item.z,
+              );
+              drawActionArrow(
+                hint.x,
+                hint.y,
+                hint.scale,
+                requiredAction,
+                time,
+                showUrgentHint,
+              );
+            }
           }
 
           if (item.kind === "hazard" && item.type === "banner") {
+            drawSprite(
+              sprites.banner,
+              width,
+              height,
+              worldLane(drawLane),
+              item.z,
+              1.68 * VIEW_TUNING.bannerWidth * VIEW_TUNING.obstacleScale,
+              2.28 * VIEW_TUNING.obstacleScale,
+              0,
+            );
+            context.restore();
+            return;
+
+            /*
+             * Legacy canvas-drawn banner retained here only for visual history.
+             * The generated 3D sprite above is now the runtime implementation.
+             *
             // 高横幅：两根霓虹立柱竖立在赛道两侧，中间挂起横幅（类似地铁跑酷的
             // 滑铲栏架）。横幅下沿距地约 0.8（角色高度 ~0.97），迫使玩家滑铲通过。
             const laneX = worldLane(drawLane);
@@ -2358,29 +2542,21 @@ export default function ConcertRushGame() {
             context.restore();
             context.restore();
             return;
+            */
           }
 
           if (item.kind === "hazard" && item.type === "speaker") {
-            // 扁音响：整台音响横放在地面上，低矮而宽，玩家跳跃通过。
-            const gp = project(width, height, worldLane(drawLane), 0, item.z);
-            const sprite = sprites.speaker;
-            if (sprite?.complete && sprite.naturalWidth) {
-              const screenH =
-                0.55 * VIEW_TUNING.obstacleScale * gp.scale;
-              const aspect = sprite.naturalWidth / sprite.naturalHeight;
-              context.save();
-              // 旋转 90° 让竖版音响侧躺，保持原始比例、不拉伸。
-              context.translate(gp.x, gp.y - screenH / 2);
-              context.rotate(Math.PI / 2);
-              context.drawImage(
-                sprite,
-                -screenH / 2,
-                -(screenH / aspect) / 2,
-                screenH,
-                screenH / aspect,
-              );
-              context.restore();
-            }
+            // 低矮横放的 3D 音响，明确提示玩家跳跃通过。
+            drawSprite(
+              sprites.speaker,
+              width,
+              height,
+              worldLane(drawLane),
+              item.z,
+              1.38 * VIEW_TUNING.obstacleScale,
+              0.82 * VIEW_TUNING.obstacleScale,
+              0,
+            );
             context.restore();
             return;
           }
@@ -2422,11 +2598,16 @@ export default function ConcertRushGame() {
         VIEW_TUNING.playerDepth,
       );
       const scale = ground.scale;
-      const activeSprite = sliding
-        ? sprites.playerSlide
-        : jump > 0
-          ? sprites.playerJump
-          : sprites.player;
+      const crashFallen = isCrashed && crashProgress >= 0.42;
+      const activeSprite = isCrashed
+        ? crashFallen
+          ? sprites.playerFallen
+          : sprites.playerStumble
+        : sliding
+          ? sprites.playerSlide
+          : jump > 0
+            ? sprites.playerJump
+            : sprites.player;
       const spriteReady =
         !!activeSprite?.complete && activeSprite.naturalWidth > 0;
       const spriteAspect = spriteReady
@@ -2436,8 +2617,13 @@ export default function ConcertRushGame() {
           : 0.55;
       // Dedicated slide art already reads as a low crouch, so it only needs a
       // gentle height reduction rather than the old squash.
+      const poseHeightScale = crashFallen
+        ? 0.58
+        : sliding
+          ? 0.72
+          : 1;
       const playerHeight =
-        scale * 1.05 * VIEW_TUNING.playerScale * (sliding ? 0.72 : 1);
+        scale * 1.05 * VIEW_TUNING.playerScale * poseHeightScale;
       const playerWidth = playerHeight * spriteAspect;
       const playerX = Math.max(
         playerWidth / 2 + 6,
@@ -2462,19 +2648,25 @@ export default function ConcertRushGame() {
         const laneMotion = run.lane - run.laneX;
         const actionAge = time - run.actionStart;
         const actionTilt =
-          jump > 0
+          isCrashed
+            ? crashFallen
+              ? 0
+              : 0.08 + crashProgress * 0.26
+            : jump > 0
             ? Math.sin((jumpAge / 0.68) * Math.PI) * -0.08
             : sliding
               ? -0.05
               : 0;
-        const laneTilt = Math.max(-0.2, Math.min(0.2, laneMotion * -0.38));
+        const laneTilt = isCrashed
+          ? 0
+          : Math.max(-0.2, Math.min(0.2, laneMotion * -0.38));
         // Never mirror the whole body; only the legs animate while running.
         const flip = 1;
         // Walking cycle: keep the torso fixed and animate only the legs so the
         // static back-view sprite reads as striding. The legs are mirrored every
         // half beat (swapping which foot leads) and lift slightly on each step.
         // The skirt hem sits in the upper band and overhangs the cut, hiding it.
-        const walkCycle = isPlaying && !sliding && jump === 0;
+        const walkCycle = isPlaying && !isCrashed && !sliding && jump === 0;
         const legCut = 0.62;
         const legOverlap = 0.05;
         // stepNorm peaks mid-stride and returns to 0 at each footfall; the leg
@@ -2551,6 +2743,38 @@ export default function ConcertRushGame() {
           drawPlayer(playerX - laneMotion * scale * 0.14, 0.22, 0.98);
         }
         drawPlayer(playerX, 1);
+
+        if (isCrashed && crashElapsed < 1.05) {
+          const impactAge = Math.min(1, crashElapsed / 0.72);
+          const impactX = playerX + playerWidth * 0.22;
+          const impactY = feet.y - playerHeight * 0.48;
+          context.save();
+          context.globalAlpha = 1 - impactAge;
+          context.strokeStyle = "#fff29a";
+          context.lineWidth = Math.max(2, scale * 0.035);
+          context.shadowColor = "#ff64b7";
+          context.shadowBlur = 14;
+          context.beginPath();
+          context.arc(
+            impactX,
+            impactY,
+            scale * (0.18 + impactAge * 0.48),
+            0,
+            Math.PI * 2,
+          );
+          context.stroke();
+          context.fillStyle = "#ff77bd";
+          context.font = `900 ${Math.max(16, scale * 0.22)}px system-ui`;
+          context.textAlign = "center";
+          context.fillText("✦", impactX - scale * 0.32, impactY);
+          context.fillStyle = "#68e7ff";
+          context.fillText(
+            "✦",
+            impactX + scale * 0.34,
+            impactY - scale * 0.18,
+          );
+          context.restore();
+        }
 
         if (isPlaying && !sliding && jump === 0) {
           const footSide = Math.sin(stepPhase) > 0 ? -1 : 1;
@@ -2694,6 +2918,10 @@ export default function ConcertRushGame() {
         context.fillRect(0, 0, width, height);
       }
 
+      if (isCrashed && crashElapsed >= run.crashDuration) {
+        commitResult(false);
+      }
+
       frame = requestAnimationFrame(draw);
     };
 
@@ -2704,7 +2932,7 @@ export default function ConcertRushGame() {
       cancelAnimationFrame(frame);
       window.removeEventListener("resize", resize);
     };
-  }, [commitResult, pushUi, revealVictory]);
+  }, [commitResult, pushUi, revealVictory, startCrash]);
 
   const handlePointerDown = (event: React.PointerEvent<HTMLElement>) => {
     pointerStart.current = { x: event.clientX, y: event.clientY };
@@ -2763,6 +2991,7 @@ export default function ConcertRushGame() {
         )}
 
         {(screen === "playing" ||
+          screen === "crashed" ||
           screen === "paused" ||
           screen === "result") && (
           <>
