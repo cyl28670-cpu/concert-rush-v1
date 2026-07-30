@@ -22,9 +22,11 @@ import {
   makeTrackEvents,
   recordJudgement,
   resolveCollision,
+  stereoPanForLane,
 } from "./logic.js";
 import {
   ASSET_BASE_URL,
+  ASSET_VERSION,
   RUN_IMAGE_FILES,
   assetUrl,
 } from "./game-assets";
@@ -32,12 +34,13 @@ import { VIEW_TUNING } from "./view-tuning";
 
 type Screen =
   | "home"
-  | "countdown"
+  | "tutorial"
   | "playing"
   | "crashed"
   | "paused"
   | "result";
 type Action = "left" | "right" | "jump" | "slide";
+const TUTORIAL_ACTION_COUNT = 4;
 type TrackConfig = (typeof TRACKS)[number];
 
 type SavedProgress = {
@@ -105,7 +108,6 @@ type GameRuntime = Omit<BaseGameState, "activeItems" | "judgement"> & {
 };
 
 const STORAGE_KEY = "concert-rush-v1-progress";
-const CRASH_DURATION_SEC = 1.5;
 const PICKUP_COLORS: Record<string, string> = {
   ticket: "#ff75bd",
   lightstick: "#61dcff",
@@ -119,21 +121,7 @@ const VIEW_DISTANCE_SEC = 6.5;
 /** Max Z-depth for rendering (derived from VIEW_DISTANCE_SEC). */
 const MAX_RENDER_Z = 5.4 + VIEW_DISTANCE_SEC * 8.4;
 
-// First appearance of each hazard type → show a gesture arrow hint above it.
-// Maps the hazard item id to the action the player must perform.
-function makeHazardHints(events: ReturnType<typeof makeTrackEvents>) {
-  const seen = new Set<string>();
-  const hints = new Map<string, Action>();
-  for (const event of events) {
-    const hazard = event.items.find((item) => item.kind === "hazard");
-    if (!hazard || seen.has(hazard.type)) continue;
-    seen.add(hazard.type);
-    hints.set(hazard.id, event.action as Action);
-  }
-  return hints;
-}
 const DEFAULT_EVENTS = makeTrackEvents(TRACK_CONFIG);
-const DEFAULT_HAZARD_HINTS = makeHazardHints(DEFAULT_EVENTS);
 const ASSET = ASSET_BASE_URL;
 const TICKET_SPRITE = RUN_IMAGE_FILES.ticket;
 const LIGHTSTICK_SPRITE = RUN_IMAGE_FILES.lightstick;
@@ -164,7 +152,7 @@ function makeRuntimeState() {
     pickupGlow: 0,
     pickupShake: 0,
     crashStartedAtMs: 0,
-    crashDuration: CRASH_DURATION_SEC,
+    crashDuration: VIEW_TUNING.crashResultDelaySec,
   }) as GameRuntime;
 }
 
@@ -174,6 +162,9 @@ const SPRITE_FILES = {
   roadsideCity: RUN_IMAGE_FILES.roadsideCity,
   stage: RUN_IMAGE_FILES.finishStage,
   player: RUN_IMAGE_FILES.player,
+  playerRun2: RUN_IMAGE_FILES.playerRun2,
+  playerRun3: RUN_IMAGE_FILES.playerRun3,
+  playerRun4: RUN_IMAGE_FILES.playerRun4,
   playerJump: RUN_IMAGE_FILES.playerJump,
   playerSlide: RUN_IMAGE_FILES.playerSlide,
   playerStumble: RUN_IMAGE_FILES.playerStumble,
@@ -220,7 +211,6 @@ function HomeScreen({
   onSelectTrack,
   onStart,
   onRules,
-  onSoon,
   onToggleMute,
 }: {
   progress: SavedProgress;
@@ -229,16 +219,11 @@ function HomeScreen({
   onSelectTrack: (trackId: string) => void;
   onStart: () => void;
   onRules: () => void;
-  onSoon: (label: string) => void;
   onToggleMute: () => void;
 }) {
-  const pct = Math.min(
-    100,
-    (progress.bestTickets / selectedTrack.ticketGoal) * 100,
-  );
-
   return (
-    <section className="home-screen" data-testid="home-screen">
+    <section className="home-screen home-redesign" data-testid="home-screen">
+      <div className="home-atmosphere" aria-hidden="true" />
       <button
         className="mute-button"
         onClick={onToggleMute}
@@ -246,32 +231,21 @@ function HomeScreen({
       >
         {progress.muted ? "🔇" : "🔊"}
       </button>
-      <img
-        className="home-title"
-        src={`${ASSET}title_home.png`}
-        alt="冲刺去演唱会吧"
-      />
 
-      <div className="home-main">
-        <img
-          className="panel-image"
-          src={`${ASSET}home_main_panel.png`}
-          alt=""
-        />
-        <div className="home-copy">
-          <p>♫　巡演目标：<strong>赶到演唱会现场</strong></p>
-          <p>
-            ♫　最高门票：
-            <strong className="pink">
-              {progress.bestTickets}/{selectedTrack.ticketGoal}
-            </strong>
-          </p>
-          <div className="home-progress" aria-label="最高门票进度">
-            <i style={{ width: `${pct}%` }} />
-          </div>
-        </div>
+      <header className="home-headline">
+        <p>演唱会快迟到了：</p>
+        <h1>内场第一排！</h1>
+      </header>
 
-        <div className="track-select" role="radiogroup" aria-label="选择歌曲">
+      <div className="home-mission">
+        <b>今日任务</b>
+        <span>跟着节拍收集门票，</span>
+        <span>冲进内场第一排！</span>
+      </div>
+
+      <section className="home-song-list">
+        <h2>歌曲列表</h2>
+        <div className="home-track-options" role="radiogroup" aria-label="选择歌曲">
           {tracks.map((track) => {
             const selected = track.id === selectedTrack.id;
             return (
@@ -287,42 +261,26 @@ function HomeScreen({
                   <b>{track.title}</b>
                   <small>{track.artist}</small>
                 </span>
-                <em className={track.difficulty}>
-                  {track.difficultyLabel}
-                </em>
+                <em>{track.difficultyLabel}</em>
               </button>
             );
           })}
-          <p className="track-selection-hint" aria-live="polite">
-            <b>✓ 已选择：{selectedTrack.title}</b>
-            <span>点击歌曲卡片即可切换</span>
-          </p>
-          <p className="more-tracks">✦ 更多歌曲敬请期待 ✦</p>
+          <p>更多歌曲敬请期待…</p>
         </div>
+      </section>
 
-        <div className="home-scene" aria-hidden="true">
-          <img
-            className="home-cover"
-            src={`${ASSET}home-song-cover-v2.png`}
-            alt=""
-          />
-        </div>
+      <img
+        className="home-mascot"
+        src={`${ASSET}home-mascot-3d-v3.png?v=8`}
+        alt="戴粉色兔耳帽的演唱会女孩"
+      />
 
-        <button className="image-button start-button" onClick={onStart}>
-          <img src={`${ASSET}btn_start.png`} alt="开始冲刺" />
-        </button>
-      </div>
-
-      <div className="home-dock">
-        <img
-          className="panel-image"
-          src={`${ASSET}home_dock_panel.png`}
-          alt=""
-        />
-        <button onClick={onRules}>📖<b>规则</b></button>
-        <button onClick={() => onSoon("排行榜")}>🏆<b>排行榜</b></button>
-        <button onClick={() => onSoon("图鉴")}>📚<b>图鉴</b></button>
-      </div>
+      <button className="home-start-cta" onClick={onStart}>
+        开始游戏
+      </button>
+      <button className="home-rules-link" onClick={onRules}>
+        玩法规则
+      </button>
     </section>
   );
 }
@@ -360,13 +318,13 @@ function RulesModal({ onClose }: { onClose: () => void }) {
         <div className="rule-tiers">
           <p>抵达终点按门票数量解锁位置：</p>
           <ul>
-            <li>🌟 100 张 · 第一排</li>
-            <li>⭐ 50–99 张 · 内场</li>
-            <li>🎫 30–49 张 · 看台</li>
-            <li>✓ 10–29 张 · 成功入场</li>
-            <li>! 不足 10 张 · 没赶上</li>
+            <li>100 张：第一排</li>
+            <li>50–99 张：内场</li>
+            <li>30–49 张：看台</li>
+            <li>10–29 张：成功入场</li>
+            <li>不足 10 张：没赶上</li>
           </ul>
-          <p className="rule-tier-warn">💀 途中撞到任何障碍物 = 赶路失败</p>
+          <p className="rule-tier-warn">途中撞到任意障碍物：赶路失败</p>
         </div>
         <div className="gesture-guide">
           <span>← →<b>换道</b></span>
@@ -414,28 +372,28 @@ function RunHud({
             <b>{ui.tickets}/{track.ticketGoal}</b>
           </span>
         </div>
+
+        {activePowerups.length > 0 && (
+          <section className="powerup-hud" aria-label="当前道具">
+            {activePowerups.map((powerup) => (
+              <div className="powerup-card" key={powerup.id}>
+                <img src={`${ASSET}${powerup.icon}`} alt="" />
+                <span>
+                  <small>{powerup.label}</small>
+                  <b>{formatPowerupTime(powerup.seconds)}</b>
+                </span>
+              </div>
+            ))}
+          </section>
+        )}
+
+        <button className="floating-pause-button" onClick={onPause} aria-label="暂停">
+          <span className="pause-icon" aria-hidden="true">
+            <i />
+            <i />
+          </span>
+        </button>
       </header>
-
-      {activePowerups.length > 0 && (
-        <section
-          className={`powerup-hud ${activePowerups.length === 1 ? "single" : ""}`}
-          aria-label="当前道具"
-        >
-          {activePowerups.map((powerup) => (
-            <div className="powerup-card" key={powerup.id}>
-              <img src={`${ASSET}${powerup.icon}`} alt="" />
-              <span>
-                <small>{powerup.label}</small>
-                <b>{formatPowerupTime(powerup.seconds)}</b>
-              </span>
-            </div>
-          ))}
-        </section>
-      )}
-
-      <button className="floating-pause-button" onClick={onPause} aria-label="暂停">
-        Ⅱ
-      </button>
     </>
   );
 }
@@ -450,10 +408,6 @@ function RunFooter({ ui, track }: { ui: UiSnapshot; track: TrackConfig }) {
         <span>演唱会 🚩</span>
       </div>
       <div className="route-bar"><i style={{ width: `${pct}%` }} /></div>
-      <div className="gesture-hint">
-        <b>↔ 左右滑动切换赛道</b>
-        <span>↑ 跳跃　↓ 下滑</span>
-      </div>
     </footer>
   );
 }
@@ -465,7 +419,7 @@ function ResultModal({
   track,
   onAgain,
   onHome,
-  onSoon,
+  onShare,
 }: {
   ui: UiSnapshot;
   success: boolean;
@@ -473,12 +427,10 @@ function ResultModal({
   track: TrackConfig;
   onAgain: () => void;
   onHome: () => void;
-  onSoon: (label: string) => void;
+  onShare: () => void;
 }) {
-  // 抵达终点 (success) → 按门票碎片数量判定入场等级；途中撞障碍 → 赶路失败。
   const tier = computeEntryTier(ui.tickets);
   const reachedFinish = success;
-  const admitted = reachedFinish && tier.id !== "missed";
   const milestones = [
     { start: 0, end: 10, value: 10, label: "入场" },
     { start: 10, end: 30, value: 30, label: "看台" },
@@ -486,69 +438,65 @@ function ResultModal({
     { start: 50, end: 100, value: 100, label: "第一排" },
   ];
 
-  const title = !reachedFinish
-    ? track.resultCopy.failureTitle
-    : admitted
-      ? track.resultCopy.successTitle
-      : track.resultCopy.shortageTitle;
   return (
     <div className="overlay result-overlay" role="dialog" aria-modal="true">
-      <section className={`result-panel ${admitted ? "success" : "failed"}`}>
-        <div className="result-mark" aria-hidden="true">
-          {admitted ? (
-            <img
-              className="result-badge"
-              src={`${ASSET}result_badge_success.png`}
-              alt=""
-            />
-          ) : (
-            <div className="fail-badge">{reachedFinish ? "✕" : "!"}</div>
-          )}
-        </div>
-        <h2>{title}</h2>
-        <div className="result-stats">
-          <span><small>本局门票 / 得分</small><b>{ui.tickets}</b></span>
-          <span><small>历史最高</small><b>{progress.bestTickets}</b></span>
-        </div>
-        <div className="milestone-card">
-          <div className="milestone-summary">
-            <b>{tier.emoji} {tier.label}</b>
-            <span>{ui.tickets} / {track.ticketGoal} 张</span>
-          </div>
-          <div className="milestone-bar" aria-label={`门票进度 ${ui.tickets} 张`}>
-            {milestones.map((milestone) => {
-              const fill = Math.max(
-                0,
-                Math.min(
-                  100,
-                  ((ui.tickets - milestone.start) /
-                    (milestone.end - milestone.start)) *
-                    100,
-                ),
-              );
-              return (
-                <span
-                  key={milestone.value}
-                  style={{ flexGrow: milestone.end - milestone.start }}
-                >
-                  <i style={{ width: `${fill}%` }} />
-                </span>
-              );
-            })}
-          </div>
-          <div className="milestone-labels">
-            {milestones.map((milestone) => (
-              <span key={milestone.value}>
-                <b>{milestone.value}</b>
-                <small>{milestone.label}</small>
-              </span>
-            ))}
-          </div>
-        </div>
-        <div className="result-actions">
-          <button className="pixel-primary" onClick={onAgain}>↻ 再来一局</button>
-          <button onClick={() => onSoon("分享")}>↗ 分享</button>
-          <button onClick={onHome}>⌂ 回首页</button>
+      <section className={`result-panel ${reachedFinish ? "success" : "failed"}`}>
+        {reachedFinish ? (
+          <>
+            <h2>恭喜获得：<strong>{tier.label}</strong></h2>
+            <div className="result-stats">
+              <span><small>获得门票</small><b>{ui.tickets}</b></span>
+              <span><small>历史记录</small><b>{progress.bestTickets}</b></span>
+            </div>
+            <div className="milestone-card">
+              <div className="milestone-summary">
+                <b>距离第一排还有</b>
+                <span>{ui.tickets} / {track.ticketGoal}</span>
+              </div>
+              <div className="milestone-bar" aria-label={`门票进度 ${ui.tickets} 张`}>
+                {milestones.map((milestone) => {
+                  const fill = Math.max(
+                    0,
+                    Math.min(
+                      100,
+                      ((ui.tickets - milestone.start) /
+                        (milestone.end - milestone.start)) *
+                        100,
+                    ),
+                  );
+                  return (
+                    <span
+                      key={milestone.value}
+                      style={{ flexGrow: milestone.end - milestone.start }}
+                    >
+                      <i style={{ width: `${fill}%` }} />
+                    </span>
+                  );
+                })}
+              </div>
+              <div className="milestone-labels">
+                {milestones.map((milestone) => (
+                  <span key={milestone.value}>
+                    <b>{milestone.value}</b>
+                    <small>{milestone.label}</small>
+                  </span>
+                ))}
+              </div>
+            </div>
+          </>
+        ) : (
+          <>
+            <h2>没赶上演唱会…</h2>
+            <div className="result-stats failure-stats">
+              <span><small>目前得分</small><b>{ui.tickets}</b></span>
+              <span><small>历史记录</small><b>{progress.bestTickets}</b></span>
+            </div>
+          </>
+        )}
+        <div className={`result-actions ${reachedFinish ? "with-share" : ""}`}>
+          <button className="pixel-primary" onClick={onAgain}>再来一局</button>
+          {reachedFinish && <button onClick={onShare}>分享</button>}
+          <button onClick={onHome}>首页</button>
         </div>
       </section>
     </div>
@@ -557,43 +505,79 @@ function ResultModal({
 
 // ─── Procedural Audio Engine (from main) ─────────────────────────────────────
 
-/** Manages Web Audio API: BGM routing, spectrum analysis, hit sounds, Miss filter.
- *  Hit / combo sounds are generated procedurally — no extra audio files required. */
+/** Manages the shared Web Audio output for music, sampled SFX and hit feedback. */
 class AudioManager {
   ctx: AudioContext | null = null;
   source: MediaElementAudioSourceNode | null = null;
+  homeSource: MediaElementAudioSourceNode | null = null;
   analyser: AnalyserNode | null = null;
   filter: BiquadFilterNode | null = null;
   /** BGM level after spectrum analysis — mute must go through here once MediaElementSource is connected. */
   masterGain: GainNode | null = null;
   /** Bus for procedural SFX so mute also silences hit/combo tones. */
   sfxGain: GainNode | null = null;
+  homeGain: GainNode | null = null;
+  stereoPanner: StereoPannerNode | null = null;
   filterActive = false;
   freqData: Uint8Array | null = null;
   audioEl: HTMLAudioElement | null = null;
+  homeAudioEl: HTMLAudioElement | null = null;
   collectBuffer: AudioBuffer | null = null;
+  successBuffer: AudioBuffer | null = null;
+  failureBuffer: AudioBuffer | null = null;
   muted = false;
   bgmVolume = 0.58;
+  homeVolume = 0.48;
+  homeEnabled = true;
+  targetPan = 0;
 
-  async loadCollectSfx() {
-    if (!this.ctx || this.collectBuffer) return;
+  private async loadBuffer(path: string) {
+    if (!this.ctx) return null;
     try {
-      const response = await fetch("/assets/coin-pickup.mp3");
-      if (!response.ok) return;
+      const response = await fetch(path);
+      if (!response.ok) return null;
       const audioData = await response.arrayBuffer();
-      this.collectBuffer = await this.ctx.decodeAudioData(audioData);
+      return await this.ctx.decodeAudioData(audioData);
     } catch {
-      // The procedural pickup tones below remain available as a fallback.
+      return null;
+    }
+  }
+
+  async loadGameSfx() {
+    if (!this.ctx) return;
+    const [collect, success, failure] = await Promise.all([
+      this.collectBuffer
+        ? Promise.resolve(this.collectBuffer)
+        : this.loadBuffer("/assets/coin-pickup.mp3"),
+      this.successBuffer
+        ? Promise.resolve(this.successBuffer)
+        : this.loadBuffer("/assets/成功.mp3"),
+      this.failureBuffer
+        ? Promise.resolve(this.failureBuffer)
+        : this.loadBuffer("/assets/失败.mp3"),
+    ]);
+    this.collectBuffer = collect;
+    this.successBuffer = success;
+    this.failureBuffer = failure;
+  }
+
+  attachHomeAudio(audioEl: HTMLAudioElement) {
+    this.homeAudioEl = audioEl;
+    if (!this.homeGain) {
+      audioEl.volume = this.muted ? 0 : this.homeVolume;
     }
   }
 
   /**
    * Connect the <audio> element into the Web Audio graph.
-   * Chain: audioEl → source → filter → analyser → masterGain → destination
-   *                                        sfxGain ↗
+   * BGM, home music and SFX share one final stereo panner.
    */
-  async init(audioEl: HTMLAudioElement) {
+  async init(
+    audioEl: HTMLAudioElement,
+    homeAudioEl?: HTMLAudioElement | null,
+  ) {
     this.audioEl = audioEl;
+    if (homeAudioEl) this.attachHomeAudio(homeAudioEl);
     if (this.ctx) {
       await this.resume();
       this.applyVolumes();
@@ -607,6 +591,11 @@ class AudioManager {
     const analyser = ctx.createAnalyser();
     const masterGain = ctx.createGain();
     const sfxGain = ctx.createGain();
+    const homeGain = ctx.createGain();
+    const stereoPanner =
+      typeof ctx.createStereoPanner === "function"
+        ? ctx.createStereoPanner()
+        : null;
 
     filter.type = "lowpass";
     filter.frequency.value = 20000;
@@ -618,15 +607,31 @@ class AudioManager {
     source.connect(filter);
     filter.connect(analyser);
     analyser.connect(masterGain);
-    masterGain.connect(ctx.destination);
-    sfxGain.connect(ctx.destination);
+    const finalOutput: AudioNode = stereoPanner ?? ctx.destination;
+    masterGain.connect(finalOutput);
+    sfxGain.connect(finalOutput);
+    homeGain.connect(finalOutput);
+    if (stereoPanner) {
+      stereoPanner.pan.value = this.targetPan;
+      stereoPanner.connect(ctx.destination);
+    }
+
+    let homeSource: MediaElementAudioSourceNode | null = null;
+    if (this.homeAudioEl) {
+      homeSource = ctx.createMediaElementSource(this.homeAudioEl);
+      homeSource.connect(homeGain);
+      this.homeAudioEl.volume = 1;
+    }
 
     this.ctx = ctx;
     this.source = source;
+    this.homeSource = homeSource;
     this.filter = filter;
     this.analyser = analyser;
     this.masterGain = masterGain;
     this.sfxGain = sfxGain;
+    this.homeGain = homeGain;
+    this.stereoPanner = stereoPanner;
     this.freqData = new Uint8Array(analyser.frequencyBinCount);
     // Element volume stays at 1; GainNodes own audible level.
     audioEl.volume = 1;
@@ -642,13 +647,38 @@ class AudioManager {
     this.applyVolumes();
   }
 
+  setHomeEnabled(enabled: boolean) {
+    this.homeEnabled = enabled;
+    this.applyVolumes();
+  }
+
   applyVolumes() {
     const bgm = this.muted ? 0 : this.bgmVolume;
     const sfx = this.muted ? 0 : 1;
+    const home = this.muted || !this.homeEnabled ? 0 : this.homeVolume;
     if (this.masterGain) this.masterGain.gain.value = bgm;
     if (this.sfxGain) this.sfxGain.gain.value = sfx;
+    if (this.homeGain) this.homeGain.gain.value = home;
     // Before the graph exists, fall back to the media element volume.
     if (this.audioEl && !this.masterGain) this.audioEl.volume = bgm;
+    if (this.homeAudioEl && !this.homeGain) {
+      this.homeAudioEl.volume = home;
+    }
+  }
+
+  setLanePan(lane: number) {
+    this.targetPan = stereoPanForLane(lane);
+    if (!this.ctx || !this.stereoPanner) return;
+    const now = this.ctx.currentTime;
+    const pan = this.stereoPanner.pan;
+    if (typeof pan.cancelAndHoldAtTime === "function") {
+      pan.cancelAndHoldAtTime(now);
+    } else {
+      const current = pan.value;
+      pan.cancelScheduledValues(now);
+      pan.setValueAtTime(current, now);
+    }
+    pan.linearRampToValueAtTime(this.targetPan, now + 0.12);
   }
 
   /** Read spectrum data. Returns average energy value across the frequency range. */
@@ -683,6 +713,26 @@ class AudioManager {
     if (!this.ctx || this.muted) return null;
     if (this.ctx.state === "suspended") void this.ctx.resume();
     return this.sfxGain ?? this.ctx.destination;
+  }
+
+  private playOneShot(buffer: AudioBuffer | null, volume = 1) {
+    const dest = this.sfxDestination();
+    if (!this.ctx || !dest || !buffer) return;
+    const source = this.ctx.createBufferSource();
+    const gain = this.ctx.createGain();
+    source.buffer = buffer;
+    gain.gain.value = volume;
+    source.connect(gain);
+    gain.connect(dest);
+    source.start();
+  }
+
+  playSuccess() {
+    this.playOneShot(this.successBuffer, 0.9);
+  }
+
+  playFailure() {
+    this.playOneShot(this.failureBuffer, 0.92);
   }
 
   /** Play a procedural hit sound based on judgement grade. */
@@ -808,28 +858,14 @@ class AudioManager {
     const now = ctx.currentTime;
 
     if (this.collectBuffer) {
-      const source = ctx.createBufferSource();
-      const gain = ctx.createGain();
-      const filter = ctx.createBiquadFilter();
-      const comboSemitones = Math.min(8, Math.floor(combo / 4));
-      const comboRate = 2 ** (comboSemitones / 12);
-      source.buffer = this.collectBuffer;
-
-      if (type === "lightstick") {
-        source.playbackRate.value = 1.12 * comboRate;
-        filter.type = "highpass";
-        filter.frequency.value = 620;
-        gain.gain.value = beatSync === "perfect" ? 0.78 : 0.68;
-      } else {
-        source.playbackRate.value = comboRate;
-        filter.type = "allpass";
-        gain.gain.value = beatSync === "perfect" ? 0.9 : 0.78;
-      }
-
-      source.connect(filter);
-      filter.connect(gain);
-      gain.connect(dest);
-      source.start(now);
+      // Play the supplied pickup sample without pitch/filter changes so every
+      // collectible keeps the same recognizable feedback.
+      void type;
+      void combo;
+      this.playOneShot(
+        this.collectBuffer,
+        beatSync === "perfect" ? 0.9 : 0.82,
+      );
       return;
     }
 
@@ -874,12 +910,19 @@ class AudioManager {
     this.ctx?.close();
     this.ctx = null;
     this.source = null;
+    this.homeSource = null;
     this.filter = null;
     this.analyser = null;
     this.masterGain = null;
     this.sfxGain = null;
+    this.homeGain = null;
+    this.stereoPanner = null;
     this.freqData = null;
     this.collectBuffer = null;
+    this.successBuffer = null;
+    this.failureBuffer = null;
+    this.audioEl = null;
+    this.homeAudioEl = null;
   }
 }
 
@@ -887,20 +930,22 @@ export default function ConcertRushGame() {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const shellRef = useRef<HTMLElement | null>(null);
   const audioRef = useRef<HTMLAudioElement | null>(null);
+  const homeAudioRef = useRef<HTMLAudioElement | null>(null);
+  const failureAudioRef = useRef<HTMLAudioElement | null>(null);
   const audioManagerRef = useRef<AudioManager>(new AudioManager());
   const spritesRef = useRef<SpriteMap>({});
   const runRef = useRef<GameRuntime>(makeRuntimeState());
   const selectedTrackRef = useRef<TrackConfig>(TRACK_CONFIG);
   const eventsRef = useRef(DEFAULT_EVENTS);
-  const hazardHintsRef = useRef(DEFAULT_HAZARD_HINTS);
+  const tutorialShownActionsRef = useRef<Set<Action>>(new Set());
+  const tutorialActionRef = useRef<Action | null>(null);
   const screenRef = useRef<Screen>("home");
   const savedRef = useRef<SavedProgress>(DEFAULT_PROGRESS);
-  const countdownTimers = useRef<number[]>([]);
   const pointerStart = useRef({ x: 0, y: 0 });
+  const pointerConsumed = useRef(false);
   const lastUiPush = useRef(0);
 
   const [screen, setScreenState] = useState<Screen>("home");
-  const [countdown, setCountdown] = useState(3);
   const [showRules, setShowRules] = useState(false);
   const [toast, setToast] = useState<string | null>(null);
   const [success, setSuccess] = useState(false);
@@ -922,7 +967,6 @@ export default function ConcertRushGame() {
     if (!track) return;
     selectedTrackRef.current = track;
     eventsRef.current = makeTrackEvents(track);
-    hazardHintsRef.current = makeHazardHints(eventsRef.current);
     setSelectedTrackId(track.id);
     const audio = audioRef.current;
     if (audio) {
@@ -943,16 +987,12 @@ export default function ConcertRushGame() {
     });
   }, []);
 
-  const clearCountdownTimers = useCallback(() => {
-    countdownTimers.current.forEach((timer) => window.clearTimeout(timer));
-    countdownTimers.current = [];
-  }, []);
-
   const commitResult = useCallback(
     (didSucceed: boolean) => {
       if (screenRef.current === "result") return;
       const run = runRef.current;
       audioRef.current?.pause();
+      if (didSucceed) audioManagerRef.current.playSuccess();
       run.mode = "result";
       run.success = didSucceed;
       setSuccess(didSucceed);
@@ -984,10 +1024,18 @@ export default function ConcertRushGame() {
       if (screenRef.current !== "playing") return;
       const run = runRef.current;
       audioRef.current?.pause();
+      const failureAudio = failureAudioRef.current;
+      if (failureAudio) {
+        failureAudio.pause();
+        failureAudio.currentTime = 0;
+        failureAudio.muted = savedRef.current.muted;
+        failureAudio.volume = 0.92;
+        void failureAudio.play().catch(() => undefined);
+      }
       run.mode = "crashed";
       run.lastTrackTime = trackTime;
       run.crashStartedAtMs = performance.now();
-      run.crashDuration = CRASH_DURATION_SEC;
+      run.crashDuration = VIEW_TUNING.crashResultDelaySec;
       setScreen("crashed");
       pushUi(trackTime);
       if ("vibrate" in navigator) {
@@ -1001,8 +1049,9 @@ export default function ConcertRushGame() {
     const audio = audioRef.current;
     if (!audio) return;
     audio.currentTime = selectedTrackRef.current.playbackStartSec;
-    audio.volume = 1;
+    audio.volume = savedRef.current.muted ? 0 : 1;
     const manager = audioManagerRef.current;
+    manager.setLanePan(0);
     manager.setMuted(savedRef.current.muted);
     void manager.resume();
     void audio.play().catch(() => {
@@ -1014,48 +1063,57 @@ export default function ConcertRushGame() {
     pushUi(0);
   }, [pushUi, setScreen]);
 
+  const playHomeMusic = useCallback(() => {
+    const homeAudio = homeAudioRef.current;
+    if (!homeAudio) return;
+    homeAudio.muted = savedRef.current.muted;
+    const manager = audioManagerRef.current;
+    manager.attachHomeAudio(homeAudio);
+    manager.setHomeEnabled(true);
+    manager.setLanePan(0);
+    manager.setMuted(savedRef.current.muted);
+    if (savedRef.current.muted) return;
+    void manager.resume();
+    void homeAudio.play().catch(() => {
+      // Mobile autoplay may wait for the next tap on the home screen.
+    });
+  }, []);
+
   const startGame = useCallback(() => {
-    clearCountdownTimers();
+    const homeAudio = homeAudioRef.current;
+    if (homeAudio) {
+      homeAudio.pause();
+      homeAudio.currentTime = 0;
+      homeAudio.muted = true;
+      homeAudio.removeAttribute("autoplay");
+    }
     const audio = audioRef.current;
     if (audio) {
-      audio.currentTime = 0;
-      audio.volume = 0;
-      void audio.play().catch(() => undefined);
       const manager = audioManagerRef.current;
-      manager.setMuted(true);
+      manager.setLanePan(0);
+      manager.setHomeEnabled(false);
+      manager.setMuted(savedRef.current.muted);
       void manager
-        .init(audio)
+        .init(audio, homeAudio)
         .then(() => {
-          void manager.loadCollectSfx();
+          void manager.loadGameSfx();
         })
         .catch(() => {
           /* non-blocking — BGM still works without Web Audio */
         });
     }
     runRef.current = makeRuntimeState();
-    runRef.current.mode = "countdown";
+    tutorialShownActionsRef.current = new Set();
+    tutorialActionRef.current = null;
     runRef.current.difficulty = 1;
     runRef.current.recentJudgements = [];
     runRef.current.supplementEvents = [];
     runRef.current.supplementEventId = 0;
     setUi(initialUi());
-    setCountdown(3);
-    setScreen("countdown");
-
-    [2, 1, 0].forEach((number, index) => {
-      const timer = window.setTimeout(() => {
-        setCountdown(number);
-        if (number === 0) {
-          const goTimer = window.setTimeout(beginRun, 450);
-          countdownTimers.current.push(goTimer);
-        }
-      }, (index + 1) * 650);
-      countdownTimers.current.push(timer);
-    });
-  }, [beginRun, clearCountdownTimers, setScreen]);
+    beginRun();
+  }, [beginRun]);
 
   const goHome = useCallback(() => {
-    clearCountdownTimers();
     const audio = audioRef.current;
     if (audio) {
       audio.pause();
@@ -1063,10 +1121,12 @@ export default function ConcertRushGame() {
     }
     // Clean up audio manager filter state
     audioManagerRef.current.removeMissFilter();
+    audioManagerRef.current.setLanePan(0);
     runRef.current = makeRuntimeState();
     setUi(initialUi());
     setScreen("home");
-  }, [clearCountdownTimers, setScreen]);
+    playHomeMusic();
+  }, [playHomeMusic, setScreen]);
 
   const pauseGame = useCallback(() => {
     if (screenRef.current !== "playing") return;
@@ -1083,10 +1143,115 @@ export default function ConcertRushGame() {
     setScreen("playing");
   }, [setScreen]);
 
-  const showSoon = useCallback((label: string) => {
-    setToast(`${label}将在下一版开放`);
-    window.setTimeout(() => setToast(null), 1800);
-  }, []);
+  const shareResultSnapshot = useCallback(async () => {
+    const source = canvasRef.current;
+    if (!source) return;
+
+    const snapshot = document.createElement("canvas");
+    snapshot.width = source.width;
+    snapshot.height = source.height;
+    const shot = snapshot.getContext("2d");
+    if (!shot) return;
+
+    const width = snapshot.width;
+    const height = snapshot.height;
+    const scale = width / 375;
+    const tier = computeEntryTier(ui.tickets);
+    const cardX = width * 0.08;
+    const cardY = height * 0.265;
+    const cardWidth = width * 0.84;
+    const cardHeight = height * 0.4;
+
+    shot.drawImage(source, 0, 0, width, height);
+    shot.fillStyle = "rgba(4, 8, 31, .64)";
+    shot.fillRect(0, 0, width, height);
+
+    const cardGradient = shot.createLinearGradient(
+      cardX,
+      cardY,
+      cardX + cardWidth,
+      cardY + cardHeight,
+    );
+    cardGradient.addColorStop(0, "#29265d");
+    cardGradient.addColorStop(1, "#14113f");
+    shot.fillStyle = cardGradient;
+    shot.strokeStyle = "#fff0bc";
+    shot.lineWidth = 3 * scale;
+    shot.beginPath();
+    shot.roundRect(cardX, cardY, cardWidth, cardHeight, 11 * scale);
+    shot.fill();
+    shot.stroke();
+
+    shot.textAlign = "center";
+    shot.fillStyle = "#ffffff";
+    shot.font = `900 ${23 * scale}px system-ui, sans-serif`;
+    shot.fillText("恭喜获得：", width / 2, cardY + 54 * scale);
+    shot.fillStyle = "#ffe48d";
+    shot.font = `1000 ${34 * scale}px system-ui, sans-serif`;
+    shot.fillText(tier.label, width / 2, cardY + 94 * scale);
+
+    const statY = cardY + 138 * scale;
+    [
+      { x: width * 0.33, label: "获得门票", value: ui.tickets },
+      { x: width * 0.67, label: "历史记录", value: progress.bestTickets },
+    ].forEach((stat) => {
+      shot.fillStyle = "#dce7ff";
+      shot.font = `800 ${12 * scale}px system-ui, sans-serif`;
+      shot.fillText(stat.label, stat.x, statY);
+      shot.fillStyle = "#ffffff";
+      shot.font = `900 ${25 * scale}px system-ui, sans-serif`;
+      shot.fillText(String(stat.value), stat.x, statY + 31 * scale);
+    });
+
+    shot.fillStyle = "#f8f1ff";
+    shot.fillRect(
+      cardX + 20 * scale,
+      cardY + 194 * scale,
+      cardWidth - 40 * scale,
+      12 * scale,
+    );
+    shot.fillStyle = "#ef79b7";
+    shot.fillRect(
+      cardX + 20 * scale,
+      cardY + 194 * scale,
+      (cardWidth - 40 * scale) *
+        Math.min(1, ui.tickets / selectedTrack.ticketGoal),
+      12 * scale,
+    );
+
+    const blob = await new Promise<Blob | null>((resolve) =>
+      snapshot.toBlob(resolve, "image/png"),
+    );
+    if (!blob) return;
+
+    const file = new File([blob], "演唱会赶场结果.png", {
+      type: "image/png",
+    });
+    try {
+      if (
+        typeof navigator.share === "function" &&
+        navigator.canShare?.({ files: [file] })
+      ) {
+        await navigator.share({
+          files: [file],
+          title: "演唱会赶场结果",
+        });
+      } else {
+        const url = URL.createObjectURL(blob);
+        const link = document.createElement("a");
+        link.href = url;
+        link.download = file.name;
+        link.click();
+        window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+        setToast("结算截图已保存");
+        window.setTimeout(() => setToast(null), 1800);
+      }
+    } catch (error) {
+      if (error instanceof DOMException && error.name === "AbortError") return;
+      setToast("截图分享失败，请再试一次");
+      window.setTimeout(() => setToast(null), 1800);
+    }
+  }, [progress.bestTickets, selectedTrack.ticketGoal, ui.tickets]);
 
   const closeRules = useCallback(() => {
     const next = { ...savedRef.current, rulesRead: true };
@@ -1102,11 +1267,54 @@ export default function ConcertRushGame() {
     setProgress(next);
     persistProgress(next);
     audioManagerRef.current.setMuted(next.muted);
-  }, []);
+    if (!next.muted && screenRef.current === "home") {
+      playHomeMusic();
+    }
+  }, [playHomeMusic]);
 
   const handleAction = useCallback(
     (action: Action) => {
+      if (screenRef.current === "tutorial") {
+        if (action !== tutorialActionRef.current) return;
+        const audio = audioRef.current;
+        const time = audio
+          ? Math.max(
+              0,
+              audio.currentTime - selectedTrackRef.current.playbackStartSec,
+            )
+          : runRef.current.lastTrackTime;
+        const run = runRef.current;
+        run.lastAction = action;
+        run.actionStart = time;
+        const previousLane = run.lane;
+        if (action === "left") run.lane = clampLane(run.lane - 1);
+        if (action === "right") run.lane = clampLane(run.lane + 1);
+        if (run.lane !== previousLane) {
+          run.lastLaneChange = time;
+          audioManagerRef.current.setLanePan(run.lane);
+        }
+        if (action === "jump") {
+          run.jumpStart = time;
+          run.slideUntil = 0;
+        }
+        if (action === "slide") run.slideUntil = time + 0.62;
+        tutorialActionRef.current = null;
+        runRef.current.mode = "playing";
+        void audioManagerRef.current.resume();
+        void audio?.play().catch(() => {
+          setToast("点击画面继续播放");
+        });
+        setScreen("playing");
+        return;
+      }
       if (screenRef.current !== "playing") return;
+      // Until all four guided actions have been completed, the runner only
+      // accepts the action shown by the tutorial arrow.
+      if (
+        tutorialShownActionsRef.current.size < TUTORIAL_ACTION_COUNT
+      ) {
+        return;
+      }
       const audio = audioRef.current;
       if (!audio) return;
       const time = Math.max(
@@ -1117,6 +1325,7 @@ export default function ConcertRushGame() {
 
       run.lastAction = action;
       run.actionStart = time;
+      const previousLane = run.lane;
       if (action === "left") {
         run.lane = clampLane(run.lane - 1);
         run.lastLaneChange = time;
@@ -1124,6 +1333,9 @@ export default function ConcertRushGame() {
       if (action === "right") {
         run.lane = clampLane(run.lane + 1);
         run.lastLaneChange = time;
+      }
+      if (run.lane !== previousLane) {
+        audioManagerRef.current.setLanePan(run.lane);
       }
       if (action === "jump" && time - run.jumpStart > 0.72) {
         run.jumpStart = time;
@@ -1170,7 +1382,7 @@ export default function ConcertRushGame() {
       }
       pushUi(time);
     },
-    [pushUi],
+    [pushUi, setScreen],
   );
 
   useEffect(() => {
@@ -1178,7 +1390,9 @@ export default function ConcertRushGame() {
     const stored = readProgress();
     savedRef.current = stored;
     audioManagerRef.current.setMuted(stored.muted);
+    audioManagerRef.current.setLanePan(0);
     runRef.current = makeRuntimeState();
+    playHomeMusic();
     queueMicrotask(() => {
       if (cancelled) return;
       setProgress(stored);
@@ -1196,9 +1410,16 @@ export default function ConcertRushGame() {
 
     return () => {
       cancelled = true;
-      clearCountdownTimers();
     };
-  }, [clearCountdownTimers]);
+  }, [playHomeMusic, ASSET_VERSION]);
+
+  useEffect(
+    () => () => {
+      homeAudioRef.current?.pause();
+      audioManagerRef.current.destroy();
+    },
+    [],
+  );
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
@@ -1270,6 +1491,19 @@ export default function ConcertRushGame() {
       points.slice(1).forEach((point) => context.lineTo(point.x, point.y));
       context.closePath();
       context.fill();
+    };
+
+    const colorWithAlpha = (hex: string, alpha: number) => {
+      const value = hex.replace("#", "");
+      const normalized =
+        value.length === 3
+          ? value.split("").map((digit) => digit + digit).join("")
+          : value;
+      const number = Number.parseInt(normalized, 16);
+      if (!Number.isFinite(number)) return `rgba(0, 0, 0, ${alpha})`;
+      return `rgba(${(number >> 16) & 255}, ${(number >> 8) & 255}, ${
+        number & 255
+      }, ${alpha})`;
     };
 
     const drawImageCover = (
@@ -1470,12 +1704,25 @@ export default function ConcertRushGame() {
           fogStart + (fogEnd - fogStart) * nearProgress;
         const farDepth =
           fogStart + (fogEnd - fogStart) * farProgress;
-        const smoothFog =
-          farProgress *
-          farProgress *
-          (3 - 2 * farProgress);
+        const riseProgress = Math.min(1, farProgress / 0.72);
+        const fogRise =
+          riseProgress *
+          riseProgress *
+          (3 - 2 * riseProgress);
+        const fadeProgress = Math.max(
+          0,
+          Math.min(1, (farProgress - 0.76) / 0.24),
+        );
+        const fogFade =
+          1 -
+          fadeProgress *
+            fadeProgress *
+            (3 - 2 * fadeProgress);
         const opacity =
-          smoothFog * VIEW_TUNING.roadEndFogOpacity * 0.74;
+          fogRise *
+          fogFade *
+          VIEW_TUNING.roadEndFogOpacity *
+          0.64;
 
         polygon(
           [
@@ -1609,6 +1856,70 @@ export default function ConcertRushGame() {
       });
     };
 
+    const drawArenaSideMotion = (
+      width: number,
+      height: number,
+      time: number,
+    ) => {
+      const spacing = VIEW_TUNING.sideLightSpacing;
+      const flow = (time * 8.4) % spacing;
+      const outsideX =
+        VIEW_TUNING.roadHalfWidth + VIEW_TUNING.sideLightOffset;
+
+      for (
+        let depth = 2.4 - flow;
+        depth < VIEW_TUNING.roadFarDepth;
+        depth += spacing
+      ) {
+        if (depth < 2.1) continue;
+        const fadeIn = Math.min(1, (depth - 2.1) / 2.4);
+        const fogFade = Math.max(
+          0,
+          Math.min(
+            1,
+            (VIEW_TUNING.itemRevealStartDepth - depth) /
+              Math.max(
+                1,
+                VIEW_TUNING.itemRevealStartDepth -
+                  VIEW_TUNING.itemFullyVisibleDepth,
+              ),
+          ),
+        );
+        const alpha =
+          VIEW_TUNING.sideLightOpacity *
+          fadeIn *
+          Math.max(0.12, fogFade);
+
+        ([-1, 1] as const).forEach((side) => {
+          const point = project(width, height, side * outsideX, 0.055, depth);
+          const lampWidth = Math.max(1.4, point.scale * 0.12);
+          const lampHeight = Math.max(0.9, point.scale * 0.035);
+          const color =
+            side < 0
+              ? VIEW_TUNING.roadEdgeLeftColor
+              : VIEW_TUNING.roadEdgeRightColor;
+
+          context.save();
+          context.globalAlpha = alpha;
+          context.shadowColor = color;
+          context.shadowBlur = Math.max(3, point.scale * 0.11);
+          context.fillStyle = color;
+          context.beginPath();
+          context.ellipse(
+            point.x,
+            point.y,
+            lampWidth,
+            lampHeight,
+            0,
+            0,
+            Math.PI * 2,
+          );
+          context.fill();
+          context.restore();
+        });
+      }
+    };
+
     const drawSprite = (
       image: HTMLImageElement | undefined,
       width: number,
@@ -1626,14 +1937,13 @@ export default function ConcertRushGame() {
       context.drawImage(image, point.x - w / 2, point.y - h, w, h);
     };
 
-    // Tutorial gesture arrow drawn above the first obstacle of each type.
+    // Single arrow animation shown over the frozen scene during first-use teaching.
     const drawActionArrow = (
       cx: number,
       cy: number,
       scale: number,
       action: Action,
       time: number,
-      urgent = false,
     ) => {
       const s = Math.max(6, scale * 0.26);
       const angle =
@@ -1642,7 +1952,7 @@ export default function ConcertRushGame() {
         : action === "left" ? -Math.PI / 2
         : Math.PI / 2;
       // Bob along the pointing direction to suggest the swipe motion.
-      const bob = Math.sin(time * 7) * s * 0.28;
+      const bob = Math.sin(time * 3.6) * s * 0.3;
 
       // Arrow shape pointing up, centered at origin (rotated per action).
       const arrow: Array<{ x: number; y: number }> = [
@@ -1668,105 +1978,14 @@ export default function ConcertRushGame() {
 
       // Draw fill + outline in screen space (stroke width independent of scale).
       context.save();
-      context.shadowColor = urgent
-        ? "rgba(255, 115, 175, 0.98)"
-        : "rgba(150, 240, 150, 0.9)";
-      context.shadowBlur = s * (urgent ? 1.15 : 0.8);
-      context.fillStyle = urgent ? "#ffe25a" : "#a8f0a0";
+      context.shadowColor = "rgba(255, 120, 194, 0.98)";
+      context.shadowBlur = s * 1.15;
+      context.fillStyle = "#fff1a8";
       context.fill();
       context.shadowBlur = 0;
       context.lineJoin = "round";
       context.lineWidth = Math.max(1.2, s * 0.14);
-      context.strokeStyle = urgent ? "#b52f68" : "#2f6b3a";
-      context.stroke();
-      context.restore();
-
-      const actionLabel: Record<Action, string> = {
-        left: "← 向左",
-        right: "向右 →",
-        jump: "↑ 跳跃",
-        slide: "↓ 下滑",
-      };
-      const label = actionLabel[action];
-      const fontSize = Math.max(9, Math.min(15, s * 0.52));
-      context.save();
-      context.font = `1000 ${fontSize}px system-ui, sans-serif`;
-      context.textAlign = "center";
-      context.textBaseline = "middle";
-      const labelWidth = context.measureText(label).width + fontSize * 1.05;
-      const labelHeight = fontSize * 1.55;
-      const labelY = cy - s * 1.65;
-      context.fillStyle = urgent
-        ? "rgba(181, 47, 104, 0.94)"
-        : "rgba(26, 65, 82, 0.86)";
-      context.beginPath();
-      context.roundRect(
-        cx - labelWidth / 2,
-        labelY - labelHeight / 2,
-        labelWidth,
-        labelHeight,
-        labelHeight / 2,
-      );
-      context.fill();
-      context.strokeStyle = urgent ? "#fff3ad" : "#dfffea";
-      context.lineWidth = 1.5;
-      context.stroke();
-      context.fillStyle = "#ffffff";
-      context.fillText(label, cx, labelY + 0.5);
-      context.restore();
-    };
-
-    const drawHazardTelegraph = (
-      width: number,
-      height: number,
-      worldX: number,
-      depth: number,
-      secondsUntilHit: number,
-      isPlayerLane: boolean,
-      time: number,
-    ) => {
-      if (secondsUntilHit > 2.5 || secondsUntilHit < -0.1) return;
-      const point = project(width, height, worldX, 0.015, depth);
-      const laneRadiusX = Math.max(8, point.scale * 0.72);
-      const laneRadiusY = Math.max(3, point.scale * 0.12);
-      const proximity = Math.max(
-        0,
-        Math.min(1, (2.5 - secondsUntilHit) / 2.35),
-      );
-      const pulse = 0.72 + Math.sin(time * 12) * 0.28;
-
-      context.save();
-      context.globalAlpha =
-        (0.16 + proximity * 0.36) *
-        (isPlayerLane ? 1 : 0.62);
-      context.fillStyle = isPlayerLane ? "#ff4f91" : "#62dff3";
-      context.shadowColor = isPlayerLane ? "#ff4f91" : "#62dff3";
-      context.shadowBlur = laneRadiusX * 0.22 * pulse;
-      context.beginPath();
-      context.ellipse(
-        point.x,
-        point.y - laneRadiusY * 0.15,
-        laneRadiusX * (0.9 + pulse * 0.1),
-        laneRadiusY,
-        0,
-        0,
-        Math.PI * 2,
-      );
-      context.fill();
-
-      context.globalAlpha = 0.65 + proximity * 0.3;
-      context.strokeStyle = isPlayerLane ? "#fff18b" : "#dffbff";
-      context.lineWidth = Math.max(1.5, point.scale * 0.025);
-      context.beginPath();
-      context.ellipse(
-        point.x,
-        point.y - laneRadiusY * 0.15,
-        laneRadiusX,
-        laneRadiusY,
-        0,
-        0,
-        Math.PI * 2,
-      );
+      context.strokeStyle = "#8b3f79";
       context.stroke();
       context.restore();
     };
@@ -1859,6 +2078,30 @@ export default function ConcertRushGame() {
         }
 
         const delta = item.time - time;
+        const requiredAction = item.requiredAction;
+        if (
+          requiredAction &&
+          !tutorialShownActionsRef.current.has(requiredAction) &&
+          delta <= 0.26 &&
+          delta > 0.12
+        ) {
+          tutorialShownActionsRef.current.add(requiredAction);
+          tutorialActionRef.current = requiredAction;
+          audioRef.current?.pause();
+          run.mode = "paused";
+          setScreen("tutorial");
+          return;
+        }
+        // During the four-step onboarding, repeated obstacle types are passed
+        // automatically. This keeps the player locked to the tutorial flow
+        // without allowing an already taught obstacle to cause a collision.
+        if (
+          tutorialShownActionsRef.current.size < TUTORIAL_ACTION_COUNT &&
+          Math.abs(delta) < 0.1
+        ) {
+          run.removedItemIds.add(item.id);
+          continue;
+        }
         if (
           item.lane === run.lane &&
           Math.abs(delta) < 0.1
@@ -2098,31 +2341,51 @@ export default function ConcertRushGame() {
         );
       }
 
-      // Spectrum-reactive pink overlay (upper area only)
-      const overlayAlpha = 0.06 + pulse * 0.08 + energy * 0.1 * burstBoost;
-      context.fillStyle = `rgba(255, 115, 187, ${Math.min(0.3, overlayAlpha)})`;
-      context.fillRect(0, 0, width, height * 0.5);
-
-      // Burst-mode vignette when difficulty is high
-      if (diffLevel >= 3) {
-        const vigAlpha = 0.04 + pulse * 0.05;
-        const vigGrad = context.createRadialGradient(
-          width / 2, height * 0.25, width * 0.4,
-          width / 2, height * 0.25, width * 0.9,
-        );
-        vigGrad.addColorStop(0, `rgba(255, 215, 60, 0)`);
-        vigGrad.addColorStop(1, `rgba(255, 80, 120, ${vigAlpha})`);
-        context.fillStyle = vigGrad;
-        context.fillRect(0, 0, width, height);
-      }
+      // A soft spectrum-reactive glow is confined to the stage. The radial
+      // falloff removes the old horizontal boundary across the seats/road.
+      const overlayAlpha =
+        VIEW_TUNING.stagePulseOpacity *
+        (0.38 + pulse * 0.42 + energy * 0.38 * burstBoost);
+      const pulseWidth = width * VIEW_TUNING.stagePulseWidthRatio;
+      const pulseHeight = height * VIEW_TUNING.stagePulseHeightRatio;
+      context.save();
+      context.translate(
+        width / 2,
+        height * VIEW_TUNING.stagePulseCenterYRatio,
+      );
+      context.scale(1, pulseHeight / pulseWidth);
+      const stageGlow = context.createRadialGradient(
+        0,
+        0,
+        0,
+        0,
+        0,
+        pulseWidth / 2,
+      );
+      stageGlow.addColorStop(
+        0,
+        `rgba(255, 226, 255, ${Math.min(0.28, overlayAlpha * 1.25)})`,
+      );
+      stageGlow.addColorStop(
+        0.42,
+        `rgba(255, 105, 197, ${Math.min(0.24, overlayAlpha)})`,
+      );
+      stageGlow.addColorStop(1, "rgba(111, 73, 255, 0)");
+      context.fillStyle = stageGlow;
+      context.beginPath();
+      context.arc(0, 0, pulseWidth / 2, 0, Math.PI * 2);
+      context.fill();
+      context.restore();
 
       // Spectrum bars (small visualization at top)
       if (isPlaying && energy > 0.1) {
         const barCount = 24;
-        const barW = Math.max(1, width / barCount - 2);
         const barMaxH = height * 0.04;
         const { bass, lowMid, highMid, high } = run.spectrumBands;
-        context.globalAlpha = 0.35;
+        context.globalAlpha = 0.22;
+        const barsLeft = width * 0.3;
+        const barsWidth = width * 0.4;
+        const stageBarW = Math.max(1, barsWidth / barCount - 1);
         for (let i = 0; i < barCount; i++) {
           let val: number;
           if (i < 6) val = bass;
@@ -2132,42 +2395,15 @@ export default function ConcertRushGame() {
           const h = Math.max(1, val * barMaxH * 1.5);
           const hue = 280 + i * 8;
           context.fillStyle = `hsla(${hue}, 85%, 60%, 0.7)`;
-          context.fillRect(i * (barW + 2), height * 0.005, barW, h);
+          context.fillRect(
+            barsLeft + i * (stageBarW + 1),
+            height * 0.115,
+            stageBarW,
+            h,
+          );
         }
         context.globalAlpha = 1;
       }
-
-      const shoulderGradient = context.createLinearGradient(
-        0,
-        height * VIEW_TUNING.roadVanishingRatio,
-        0,
-        height,
-      );
-      shoulderGradient.addColorStop(0, "#5d7187");
-      shoulderGradient.addColorStop(1, "#263343");
-
-      // Cool dark shoulders keep the black road distinct from the blue skyline.
-      polygon(
-        [
-          project(width, height, -17, 0, 2),
-          project(width, height, 17, 0, 2),
-          project(
-            width,
-            height,
-            VIEW_TUNING.roadHalfWidth + 3.5,
-            0,
-            VIEW_TUNING.roadFarDepth,
-          ),
-          project(
-            width,
-            height,
-            -VIEW_TUNING.roadHalfWidth - 3.5,
-            0,
-            VIEW_TUNING.roadFarDepth,
-          ),
-        ],
-        shoulderGradient,
-      );
 
       const roadGradient = context.createLinearGradient(
         0,
@@ -2175,32 +2411,50 @@ export default function ConcertRushGame() {
         0,
         height,
       );
-      roadGradient.addColorStop(0, "#263044");
-      roadGradient.addColorStop(0.42, "#121a28");
-      roadGradient.addColorStop(1, "#080c14");
-
-      // Near-black asphalt with a subtle navy horizon.
-      polygon(
-        [
-          project(width, height, -VIEW_TUNING.roadHalfWidth, 0.02, 2),
-          project(width, height, VIEW_TUNING.roadHalfWidth, 0.02, 2),
-          project(
-            width,
-            height,
-            VIEW_TUNING.roadHalfWidth,
-            0.02,
-            VIEW_TUNING.roadFarDepth,
-          ),
-          project(
-            width,
-            height,
-            -VIEW_TUNING.roadHalfWidth,
-            0.02,
-            VIEW_TUNING.roadFarDepth,
-          ),
-        ],
-        roadGradient,
+      // The arena background already contains the stage entrance. Fade the
+      // asphalt into it instead of ending the road with a visible horizontal
+      // trapezoid in front of the LED screen.
+      roadGradient.addColorStop(
+        0,
+        colorWithAlpha(VIEW_TUNING.roadColorFar, 0.28),
       );
+      roadGradient.addColorStop(
+        0.1,
+        colorWithAlpha(VIEW_TUNING.roadColorFar, 0.72),
+      );
+      roadGradient.addColorStop(0.22, VIEW_TUNING.roadColorFar);
+      roadGradient.addColorStop(0.48, VIEW_TUNING.roadColorMid);
+      roadGradient.addColorStop(1, VIEW_TUNING.roadColorNear);
+
+      const roadShape = [
+        project(width, height, -VIEW_TUNING.roadHalfWidth, 0.02, 2),
+        project(width, height, VIEW_TUNING.roadHalfWidth, 0.02, 2),
+        project(
+          width,
+          height,
+          VIEW_TUNING.roadHalfWidth,
+          0.02,
+          VIEW_TUNING.roadFarDepth,
+        ),
+        project(
+          width,
+          height,
+          -VIEW_TUNING.roadHalfWidth,
+          0.02,
+          VIEW_TUNING.roadFarDepth,
+        ),
+      ];
+      polygon(roadShape, roadGradient);
+
+      // Plum-pink sides fall into a gentle center highlight, keeping the
+      // middle lane readable while visually widening the concert runway.
+      const roadCenterGlow = context.createLinearGradient(0, 0, width, 0);
+      roadCenterGlow.addColorStop(0, "rgba(102, 54, 111, 0.52)");
+      roadCenterGlow.addColorStop(0.22, "rgba(187, 102, 151, 0.2)");
+      roadCenterGlow.addColorStop(0.5, "rgba(255, 248, 253, 0.3)");
+      roadCenterGlow.addColorStop(0.78, "rgba(187, 102, 151, 0.2)");
+      roadCenterGlow.addColorStop(1, "rgba(102, 54, 111, 0.52)");
+      polygon(roadShape, roadCenterGlow);
 
       [-VIEW_TUNING.roadHalfWidth, VIEW_TUNING.roadHalfWidth].forEach(
         (roadEdge) => {
@@ -2223,7 +2477,9 @@ export default function ConcertRushGame() {
                 VIEW_TUNING.roadFarDepth,
               ),
             ],
-            roadEdge < 0 ? "#ff77b5" : "#65dcff",
+            roadEdge < 0
+              ? VIEW_TUNING.roadEdgeLeftColor
+              : VIEW_TUNING.roadEdgeRightColor,
           );
         },
       );
@@ -2280,10 +2536,14 @@ export default function ConcertRushGame() {
                 dashEnd,
               ),
             ],
-            "#e7f9ff",
+            VIEW_TUNING.laneLineColor,
           );
         }
       });
+
+      if (!showFinishStage) {
+        drawArenaSideMotion(width, height, time);
+      }
 
       // Distance fog progressively removes the road color and lane contrast
       // before the road reaches the bright horizon core.
@@ -2316,7 +2576,7 @@ export default function ConcertRushGame() {
       const spriteSize: Record<string, [number, number]> = {
         ticket: [0.52, 0.42],
         lightstick: [0.5, 0.7],
-        roadblock: [0.68, 1.36],
+        roadblock: [0.72, 1.72],
         speaker: [1.38, 0.82],
       };
 
@@ -2361,46 +2621,6 @@ export default function ConcertRushGame() {
 
           const drawLane = item.lane;
 
-          if (item.kind === "hazard") {
-            const secondsUntilHit = item.time - time;
-            const isPlayerLane = item.lane === run.lane;
-            drawHazardTelegraph(
-              width,
-              height,
-              worldLane(drawLane),
-              item.z,
-              secondsUntilHit,
-              isPlayerLane,
-              time,
-            );
-
-            const isTutorialHint = hazardHintsRef.current.has(item.id);
-            const showUrgentHint =
-              isPlayerLane &&
-              secondsUntilHit > 0.18 &&
-              secondsUntilHit < 2.05;
-            const requiredAction =
-              item.requiredAction ??
-              hazardHintsRef.current.get(item.id);
-            if (requiredAction && (isTutorialHint || showUrgentHint)) {
-              const hint = project(
-                width,
-                height,
-                worldLane(drawLane),
-                item.type === "speaker" ? 1.35 : 2.0,
-                item.z,
-              );
-              drawActionArrow(
-                hint.x,
-                hint.y,
-                hint.scale,
-                requiredAction,
-                time,
-                showUrgentHint,
-              );
-            }
-          }
-
           if (item.kind === "hazard" && item.type === "banner") {
             drawSprite(
               sprites.banner,
@@ -2408,9 +2628,9 @@ export default function ConcertRushGame() {
               height,
               worldLane(drawLane),
               item.z,
-              1.68 * VIEW_TUNING.bannerWidth * VIEW_TUNING.obstacleScale,
-              2.28 * VIEW_TUNING.obstacleScale,
-              0,
+              1.46 * VIEW_TUNING.bannerWidth * VIEW_TUNING.obstacleScale,
+              1.55 * VIEW_TUNING.obstacleScale,
+              -0.055,
             );
             context.restore();
             return;
@@ -2555,7 +2775,7 @@ export default function ConcertRushGame() {
               item.z,
               1.38 * VIEW_TUNING.obstacleScale,
               0.82 * VIEW_TUNING.obstacleScale,
-              0,
+              -0.055,
             );
             context.restore();
             return;
@@ -2569,7 +2789,7 @@ export default function ConcertRushGame() {
             item.z,
             size[0],
             size[1],
-            0,
+            item.kind === "hazard" ? -0.055 : 0,
           );
           context.restore();
         });
@@ -2599,6 +2819,17 @@ export default function ConcertRushGame() {
       );
       const scale = ground.scale;
       const crashFallen = isCrashed && crashProgress >= 0.42;
+      const runCycle = [
+        sprites.player,
+        sprites.playerRun2,
+        sprites.playerRun3,
+        sprites.playerRun4,
+      ];
+      const runFrame =
+        runCycle[
+          Math.floor((time / beat) * runCycle.length) %
+            runCycle.length
+        ] || sprites.player;
       const activeSprite = isCrashed
         ? crashFallen
           ? sprites.playerFallen
@@ -2607,7 +2838,7 @@ export default function ConcertRushGame() {
           ? sprites.playerSlide
           : jump > 0
             ? sprites.playerJump
-            : sprites.player;
+            : runFrame;
       const spriteReady =
         !!activeSprite?.complete && activeSprite.naturalWidth > 0;
       const spriteAspect = spriteReady
@@ -2619,6 +2850,8 @@ export default function ConcertRushGame() {
       // gentle height reduction rather than the old squash.
       const poseHeightScale = crashFallen
         ? 0.58
+        : isCrashed
+          ? 0.83
         : sliding
           ? 0.72
           : 1;
@@ -2655,86 +2888,35 @@ export default function ConcertRushGame() {
             : jump > 0
             ? Math.sin((jumpAge / 0.68) * Math.PI) * -0.08
             : sliding
-              ? -0.05
+              ? 0
               : 0;
-        const laneTilt = isCrashed
+        const laneTilt = isCrashed || sliding
           ? 0
           : Math.max(-0.2, Math.min(0.2, laneMotion * -0.38));
-        // Never mirror the whole body; only the legs animate while running.
+        // Never mirror the whole body; preserve a stable rear-facing run pose.
         const flip = 1;
-        // Walking cycle: keep the torso fixed and animate only the legs so the
-        // static back-view sprite reads as striding. The legs are mirrored every
-        // half beat (swapping which foot leads) and lift slightly on each step.
-        // The skirt hem sits in the upper band and overhangs the cut, hiding it.
+        // Four aligned rear-view frames provide an actual footfall cycle.
+        // Keep deformation almost zero so the character remains grounded.
         const walkCycle = isPlaying && !isCrashed && !sliding && jump === 0;
-        const legCut = 0.62;
-        const legOverlap = 0.05;
-        // stepNorm peaks mid-stride and returns to 0 at each footfall; the leg
-        // mirror swap happens exactly at footfall (sin == 0) so it is hidden.
         const stepNorm = walkCycle ? Math.abs(Math.sin(stepPhase)) : 0;
-        const stepFlip =
-          walkCycle && Math.floor((time / beat) * 2) % 2 === 1 ? -1 : 1;
-        const legLift = stepNorm * playerHeight * 0.03;
-        // Body follows the stride: a gentle bounce lifts the whole figure at
-        // push-off and a small alternating lean keeps torso and legs coordinated.
-        const bodyBounce = stepNorm * playerHeight * 0.022;
-        const bodyLean = walkCycle ? Math.sin(stepPhase) * 0.03 : 0;
-        const bodyStretch = walkCycle ? stepNorm * 0.02 : 0;
+        const bodyBounce = stepNorm * playerHeight * 0.004;
         const drawPlayer = (
           x: number,
           alpha: number,
           extraScale = 1,
         ) => {
-          const sw = playerSprite.naturalWidth;
-          const sh = playerSprite.naturalHeight;
           context.save();
           context.globalAlpha = alpha;
           context.translate(x, feet.y - bodyBounce);
-          context.rotate(laneTilt + actionTilt + bodyLean);
-          context.scale(
-            flip * (1 - bodyStretch) * extraScale,
-            (1 + bodyStretch) * extraScale,
+          context.rotate(laneTilt + actionTilt);
+          context.scale(flip * extraScale, extraScale);
+          context.drawImage(
+            playerSprite,
+            -playerWidth / 2,
+            -playerHeight,
+            playerWidth,
+            playerHeight,
           );
-          if (walkCycle) {
-            const lowerH = playerHeight * (1 - legCut);
-            // Legs (drawn first, behind the torso): mirror + slight lift.
-            context.save();
-            context.translate(0, -legLift);
-            context.scale(stepFlip, 1);
-            context.drawImage(
-              playerSprite,
-              0,
-              sh * legCut,
-              sw,
-              sh * (1 - legCut),
-              -playerWidth / 2,
-              -lowerH,
-              playerWidth,
-              lowerH,
-            );
-            context.restore();
-            // Upper body over the legs; extends past the cut so the skirt hides
-            // the seam.
-            context.drawImage(
-              playerSprite,
-              0,
-              0,
-              sw,
-              sh * (legCut + legOverlap),
-              -playerWidth / 2,
-              -playerHeight,
-              playerWidth,
-              playerHeight * (legCut + legOverlap),
-            );
-          } else {
-            context.drawImage(
-              playerSprite,
-              -playerWidth / 2,
-              -playerHeight,
-              playerWidth,
-              playerHeight,
-            );
-          }
           context.restore();
         };
 
@@ -2918,6 +3100,19 @@ export default function ConcertRushGame() {
         context.fillRect(0, 0, width, height);
       }
 
+      if (
+        screenRef.current === "tutorial" &&
+        tutorialActionRef.current
+      ) {
+        drawActionArrow(
+          width / 2,
+          height * 0.48,
+          Math.min(width, height) * 0.35,
+          tutorialActionRef.current,
+          performance.now() / 1000,
+        );
+      }
+
       if (isCrashed && crashElapsed >= run.crashDuration) {
         commitResult(false);
       }
@@ -2935,10 +3130,43 @@ export default function ConcertRushGame() {
   }, [commitResult, pushUi, revealVictory, startCrash]);
 
   const handlePointerDown = (event: React.PointerEvent<HTMLElement>) => {
+    if (screenRef.current === "home") playHomeMusic();
+    const target = event.target;
+    if (
+      target instanceof Element &&
+      target.closest("button, a, input, select, textarea")
+    ) {
+      pointerConsumed.current = true;
+      return;
+    }
+
     pointerStart.current = { x: event.clientX, y: event.clientY };
+    pointerConsumed.current = false;
+    event.currentTarget.setPointerCapture(event.pointerId);
+  };
+
+  const handlePointerMove = (event: React.PointerEvent<HTMLElement>) => {
+    if (pointerConsumed.current) return;
+
+    const dx = event.clientX - pointerStart.current.x;
+    const dy = event.clientY - pointerStart.current.y;
+    if (Math.max(Math.abs(dx), Math.abs(dy)) < 18) return;
+
+    if (Math.abs(dx) > Math.abs(dy)) {
+      handleAction(dx > 0 ? "right" : "left");
+    } else {
+      handleAction(dy > 0 ? "slide" : "jump");
+    }
+    pointerConsumed.current = true;
   };
 
   const handlePointerUp = (event: React.PointerEvent<HTMLElement>) => {
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    }
+    if (pointerConsumed.current) return;
+    pointerConsumed.current = true;
+
     const dx = event.clientX - pointerStart.current.x;
     const dy = event.clientY - pointerStart.current.y;
     if (Math.max(Math.abs(dx), Math.abs(dy)) < 18) {
@@ -2946,12 +3174,13 @@ export default function ConcertRushGame() {
         void audioManagerRef.current.resume();
         void audioRef.current.play();
       }
-      return;
     }
-    if (Math.abs(dx) > Math.abs(dy)) {
-      handleAction(dx > 0 ? "right" : "left");
-    } else {
-      handleAction(dy > 0 ? "slide" : "jump");
+  };
+
+  const handlePointerCancel = (event: React.PointerEvent<HTMLElement>) => {
+    pointerConsumed.current = true;
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId);
     }
   };
 
@@ -2961,7 +3190,9 @@ export default function ConcertRushGame() {
         ref={shellRef}
         className={`game-shell screen-${screen}`}
         onPointerDown={handlePointerDown}
+        onPointerMove={handlePointerMove}
         onPointerUp={handlePointerUp}
+        onPointerCancel={handlePointerCancel}
       >
         <canvas
           ref={canvasRef}
@@ -2969,6 +3200,14 @@ export default function ConcertRushGame() {
           aria-label="三车道演唱会跑酷赛道"
         />
         <audio ref={audioRef} src={selectedTrack.audioSrc} preload="auto" />
+        <audio
+          ref={homeAudioRef}
+          src="/assets/游戏开始音乐.mp3"
+          preload="auto"
+          loop
+          playsInline
+        />
+        <audio ref={failureAudioRef} src="/assets/失败.mp3" preload="auto" />
 
         {screen === "home" && (
           <HomeScreen
@@ -2978,16 +3217,8 @@ export default function ConcertRushGame() {
             onSelectTrack={selectTrack}
             onStart={startGame}
             onRules={() => setShowRules(true)}
-            onSoon={showSoon}
             onToggleMute={toggleMute}
           />
-        )}
-
-        {screen === "countdown" && (
-          <div className="countdown-screen">
-            <b>{countdown === 0 ? "GO!" : countdown}</b>
-            <span>快赶上开场！</span>
-          </div>
         )}
 
         {(screen === "playing" ||
@@ -3026,7 +3257,7 @@ export default function ConcertRushGame() {
             track={selectedTrack}
             onAgain={startGame}
             onHome={goHome}
-            onSoon={showSoon}
+            onShare={shareResultSnapshot}
           />
         )}
 

@@ -20,6 +20,7 @@ import {
   makeTrackEvents,
   recordJudgement,
   resolveCollision,
+  stereoPanForLane,
 } from "../app/game/logic.js";
 import { SPECTRUM_MAPPER_CONFIG } from "../app/spectrumMapper.js";
 import { createChartPlayer } from "../app/game/chartPlayer.js";
@@ -39,6 +40,14 @@ test("lane movement never leaves the three-lane course", () => {
   assert.equal(clampLane(-1), -1);
   assert.equal(clampLane(0), 0);
   assert.equal(clampLane(2), 1);
+});
+
+test("three runner lanes map to clamped stereo pan positions", () => {
+  assert.equal(stereoPanForLane(-1), -0.6);
+  assert.equal(stereoPanForLane(0), 0);
+  assert.equal(stereoPanForLane(1), 0.6);
+  assert.equal(stereoPanForLane(-4), -0.6);
+  assert.equal(stereoPanForLane(4), 0.6);
 });
 
 test("multiplier increases every four combo points and caps at eight", () => {

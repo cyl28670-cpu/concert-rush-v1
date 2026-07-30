@@ -177,6 +177,11 @@ export function clampLane(lane) {
   return Math.max(-1, Math.min(1, lane));
 }
 
+/** Natural but clearly audible stereo position for the three runner lanes. */
+export function stereoPanForLane(lane) {
+  return clampLane(lane) * 0.6;
+}
+
 export function computeMultiplier(combo) {
   return Math.min(8, 1 + Math.floor(Math.max(0, combo) / 4));
 }
