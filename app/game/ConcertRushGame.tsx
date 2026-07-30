@@ -64,6 +64,7 @@ type ActiveItem = {
   type: string;
   lane: number;
   time: number;
+  ticketValue?: number;
   gridTime?: number;
   hitTime?: number;
   requiredAction?: Action;
@@ -369,7 +370,7 @@ function RunHud({
           <img src={`${ASSET}${TICKET_SPRITE}`} alt="" />
           <span>
             <small>门票 / 得分</small>
-            <b>{ui.tickets}/{track.ticketGoal}</b>
+            <b><strong>{ui.tickets}</strong>/{track.ticketGoal}</b>
           </span>
         </div>
 
@@ -2051,7 +2052,10 @@ export default function ConcertRushGame() {
                   : beatOffset <= 0.18
                     ? "good"
                     : null;
-            Object.assign(run, collectItem(run, item.type, time));
+            Object.assign(
+              run,
+              collectItem(run, item.type, time, item.ticketValue),
+            );
             run.removedItemIds.add(item.id);
             audioManagerRef.current.playCollect(
               item.type,
@@ -2079,11 +2083,20 @@ export default function ConcertRushGame() {
 
         const delta = item.time - time;
         const requiredAction = item.requiredAction;
+        const hasPendingPickupBeforeHazard = run.activeItems.some(
+          (candidate) =>
+            candidate.kind === "collectible" &&
+            !run.removedItemIds.has(candidate.id) &&
+            candidate.lane === run.lane &&
+            pickupTimelineTime(candidate) > time &&
+            pickupTimelineTime(candidate) < item.time,
+        );
         if (
           requiredAction &&
           !tutorialShownActionsRef.current.has(requiredAction) &&
+          !hasPendingPickupBeforeHazard &&
           delta <= 0.26 &&
-          delta > 0.12
+          delta > 0.06
         ) {
           tutorialShownActionsRef.current.add(requiredAction);
           tutorialActionRef.current = requiredAction;

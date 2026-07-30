@@ -1958,7 +1958,10 @@ button {
   letter-spacing: -0.05em;
 }
 
-.ticket-score b::first-letter { color: #e3c139; }
+.ticket-score b strong {
+  color: #e3c139;
+  font: inherit;
+}
 
 .powerup-hud {
   width: auto;

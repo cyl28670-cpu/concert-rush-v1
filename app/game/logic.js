@@ -203,6 +203,23 @@ export function didCrossPickupTime(
   );
 }
 
+function applyTicketScoreValues(events, ticketGoal) {
+  const tickets = events
+    .flatMap((event) => event.items)
+    .filter((item) => item.kind === "collectible" && item.type === "ticket");
+
+  // Each chart can contain a different number of beat-synced tickets. Spread
+  // the 100-point total across them as whole-number values, so a perfect run
+  // always reaches exactly 100 without requiring exactly 100 sprites.
+  tickets.forEach((ticket, index) => {
+    ticket.ticketValue =
+      Math.floor(((index + 1) * ticketGoal) / tickets.length) -
+      Math.floor((index * ticketGoal) / tickets.length);
+  });
+
+  return events;
+}
+
 export function makeTrackEvents(config = TRACK_CONFIG) {
   const generatedChart =
     config.id === "super-shy"
@@ -212,10 +229,11 @@ export function makeTrackEvents(config = TRACK_CONFIG) {
         : null;
 
   if (generatedChart) {
-    return generatedChart.map((event) => ({
+    const events = generatedChart.map((event) => ({
       ...event,
       items: event.items.map((item) => ({ ...item })),
     }));
+    return applyTicketScoreValues(events, config.ticketGoal);
   }
 
   const beat = 60 / config.bpm;
@@ -249,7 +267,7 @@ export function makeTrackEvents(config = TRACK_CONFIG) {
   // 3. Build events with lwh obstacle/collectible types only:
   //    hazards  → speaker / banner / roadblock
   //    rewards  → ticket / lightstick
-  return filtered.map((scripted, index) => {
+  const events = filtered.map((scripted, index) => {
     let action = scripted.action;
     const oldLane = routeLane;
 
@@ -303,6 +321,7 @@ export function makeTrackEvents(config = TRACK_CONFIG) {
       ],
     };
   }).filter((event) => event.time < config.durationSec - 0.6);
+  return applyTicketScoreValues(events, config.ticketGoal);
 }
 
 export function judgeAction(events, action, time, consumedIds = new Set()) {
@@ -393,7 +412,7 @@ export function recordJudgement(state, grade, time) {
  * and current difficulty. Called every few frames during gameplay.
  *
  * Spectrum bands influence reward types:
- *   bass  peaks → more tickets
+ *   bass peaks → extra tickets
  *   high-frequency peaks → more lightsticks
  *   high difficulty → chance of an extra lightstick powerup
  *
@@ -406,8 +425,6 @@ export function generateSupplementEvents(state, time, spectrumBands) {
   const { bass, lowMid, highMid, high } = spectrumBands;
   const events = [];
   let idCounter = state.supplementEventId;
-  const beat = 60 / TRACK_CONFIG.bpm;
-
   // Dynamic rewards are created behind the opaque cloud, never in visible road space.
   const leadSec = 4.2 + Math.random() * 2.0;
 
@@ -452,11 +469,14 @@ export function generateSupplementEvents(state, time, spectrumBands) {
   };
 }
 
-export function collectItem(state, type, time) {
+export function collectItem(state, type, time, ticketValue = 1) {
   const next = { ...state };
 
   if (type === "ticket") {
-    next.tickets = Math.min(TRACK_CONFIG.ticketGoal, state.tickets + 1);
+    next.tickets = Math.min(
+      TRACK_CONFIG.ticketGoal,
+      state.tickets + ticketValue,
+    );
     next.score += 120;
   } else if (type === "lightstick") {
     next.lightstickUntil = Math.max(time, state.lightstickUntil) + 5;

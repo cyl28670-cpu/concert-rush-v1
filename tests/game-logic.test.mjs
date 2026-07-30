@@ -141,7 +141,13 @@ test("audio-generated chart stays dense through the end of the song", () => {
 test("obstacles and collectibles share one deterministic audio chart", () => {
   const events = makeTrackEvents();
   assert.notEqual(events, GENERATED_TRACK_EVENTS);
-  assert.deepEqual(events, GENERATED_TRACK_EVENTS);
+  assert.deepEqual(
+    events.map((event) => ({
+      ...event,
+      items: event.items.map(({ ticketValue, ...item }) => item),
+    })),
+    GENERATED_TRACK_EVENTS,
+  );
   assert.equal(
     events.filter((event) =>
       event.items.some((item) => item.kind === "hazard"),
